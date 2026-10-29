@@ -10,6 +10,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, section, type Extension } from "@earendil-works/pi-durable";
 
@@ -20,43 +21,15 @@ const MAX_DESCRIPTION = 1024;
 
 // ------------------------------------------------------------------ frontmatter
 
-/** The top-level keys of a `---` YAML block: scalars (plain, quoted, folded `>`, literal `|`) and booleans. Throws on anything else. */
-export function parseFrontmatter(text: string): { data: Record<string, string | boolean>; body: string } {
+/** The `---` YAML block at the top of a file, parsed by the yaml package like pi does. Throws on malformed YAML. */
+export function parseFrontmatter(text: string): { data: Record<string, unknown>; body: string } {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   if (lines[0]?.trim() !== "---") return { data: {}, body: lines.join("\n") };
   const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
   if (end < 0) throw Error("frontmatter is not closed");
-  const data: Record<string, string | boolean> = {};
-  for (let i = 1; i < end; i++) {
-    const line = lines[i];
-    if (!line.trim() || line.trimStart().startsWith("#") || /^-(\s|$)/.test(line)) continue;
-    const m = /^([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line);
-    if (!m) throw Error(`frontmatter line ${i + 1} is not "key: value": ${line.trim().slice(0, 60)}`);
-    const [, key, rest = ""] = m;
-    const indented: string[] = [];
-    while (i + 1 < end && (/^\s+\S/.test(lines[i + 1]) || !lines[i + 1].trim())) indented.push(lines[++i]);
-    const block = /^([>|])([+-]?)$/.exec(rest.trim());
-    if (block) {
-      const content = indented.map((l) => l.trim());
-      while (content.length && !content.at(-1)) content.pop();
-      data[key] = block[1] === ">" ? content.join(" ").replace(/\s+/g, " ").trim() : content.join("\n");
-    } else if (!rest.trim()) {
-      // A nested map or list (`metadata:`, `allowed-tools:`): nothing here reads it.
-    } else data[key] = scalar([rest.trim(), ...indented.map((l) => l.trim())].join(" ").trim());
-  }
+  const parsed = parseYaml(lines.slice(1, end).join("\n"));
+  const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
   return { data, body: lines.slice(end + 1).join("\n") };
-}
-
-function scalar(raw: string): string | boolean {
-  const quoted = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(raw) ?? /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(raw);
-  if (quoted) return raw[0] === '"' ? quoted[1].replace(/\\(.)/g, (_, c) => (c === "n" ? "\n" : c)) : quoted[1].replace(/''/g, "'");
-  if (/^["']/.test(raw)) throw Error(`unterminated or trailing text after quoted value: ${raw.slice(0, 60)}`);
-  if (/^[[{]/.test(raw)) {
-    if (!/^(\[.*\]|\{.*\})(\s+#.*)?$/.test(raw)) throw Error(`unclosed flow collection: ${raw.slice(0, 60)}`);
-    return raw;
-  }
-  const plain = raw.replace(/\s+#.*$/, "").trim();
-  return plain === "true" ? true : plain === "false" ? false : plain;
 }
 
 // ------------------------------------------------------------------ discovery

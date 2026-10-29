@@ -10,7 +10,7 @@ import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import { createSkills } from "../src/skills.js";
+import { createSkills, parseFrontmatter } from "../src/skills.js";
 
 type Msg = { role: string; content?: unknown };
 const textOf = (m?: Msg) =>
@@ -225,4 +225,28 @@ test("the harness environment reads a skill folder outside the workspace", async
   } finally {
     await t.cleanup();
   }
+});
+
+test("frontmatter is real YAML: multi-line flow lists, block scalars with chomping, quoted keys, comments", () => {
+  const { data, body } = parseFrontmatter(
+    [
+      "---",
+      "# a comment",
+      "name: review-pr",
+      'description: >-',
+      "  Reviews a pull request",
+      "  and reports findings.",
+      "allowed-tools: [read,",
+      "  bash]",
+      '"disable-model-invocation": true',
+      "---",
+      "# Body",
+    ].join("\n"),
+  );
+  assert.equal(data.name, "review-pr");
+  assert.equal(data.description, "Reviews a pull request and reports findings.");
+  assert.deepEqual(data["allowed-tools"], ["read", "bash"]);
+  assert.equal(data["disable-model-invocation"], true);
+  assert.equal(body, "# Body");
+  assert.throws(() => parseFrontmatter("---\nname: [unclosed\n---\n"));
 });
