@@ -4,11 +4,13 @@
 //
 //   system-prompts       a checklist of built-in system prompts, rendered as one section
 //   jev-damage-control   Jev judges every bash command before it runs and blocks destructive ones
+//   durable-jim-manager  the job tools of the durable-jim Manager (they call the Scheduler's API); only the Manager turns it on
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineDoc, defineExtension, hook, section, ToolTask, type Extension } from "@earendil-works/pi-durable";
 import type { HarnessExtensionInfo } from "../../dpi-sdk/src/api.js";
 import { askJev, type JevAnswer, type JevQuestion } from "./jev.js";
+import { createManager, MANAGER_EXTENSION, type SchedulerApi } from "./manager.js";
 
 const PROMPTS_DIR = join(import.meta.dirname, "../prompts");
 
@@ -94,9 +96,15 @@ export const ADDON_INFO: Omit<HarnessExtensionInfo, "enabled" | "prompts">[] = [
     description:
       "Before every bash call, Jev judges the command in about 300 ms and blocks irreversible or destructive ones. The decision is a durable memo, so a restart never re-asks. If Jev is down, commands run.",
   },
+  {
+    name: MANAGER_EXTENSION,
+    title: "durable-jim Manager",
+    description:
+      "Tools to create, change, run, stop and delete the user's scheduled jobs and to answer their questions, by calling the durable-jim Scheduler. Saving, changing or deleting a job asks the user to approve first. Meant for the Manager session only.",
+  },
 ];
 
-export function createAddons(opts: { offline: boolean }) {
+export function createAddons(opts: { offline: boolean; scheduler?: SchedulerApi }) {
   const prompts = defineExtension({
     name: "system-prompts",
     sections: [
@@ -133,8 +141,9 @@ export function createAddons(opts: { offline: boolean }) {
       }),
     ],
   });
-  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev };
-  return { all, list: [prompts, jev] };
+  const manager = createManager({ scheduler: opts.scheduler });
+  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev, [MANAGER_EXTENSION]: manager };
+  return { all, list: [prompts, jev, manager] };
 }
 
 export type Addons = ReturnType<typeof createAddons>;
