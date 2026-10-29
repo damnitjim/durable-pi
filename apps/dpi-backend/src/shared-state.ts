@@ -14,12 +14,14 @@ const Data = defineDoc<AppState>({
   version: 1,
   scope: "session",
   initial: () => ({}),
+  checkpointWhen: () => false,
 });
 const Meta = defineDoc<{ initialized: boolean; revision: number }>({
   kind: "app.shared-state-meta",
   version: 1,
   scope: "session",
   initial: () => ({ initialized: false, revision: 0 }),
+  checkpointWhen: () => false,
 });
 const Receipts = defineDocFamily<{ applied: boolean; result: string }, null>({
   kind: "app.shared-state-receipt",
@@ -27,6 +29,7 @@ const Receipts = defineDocFamily<{ applied: boolean; result: string }, null>({
   scope: "session",
   family: true,
   initial: () => ({ applied: false, result: "" }),
+  checkpointWhen: () => false,
 });
 
 export class SharedState {

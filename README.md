@@ -337,7 +337,9 @@ just proactive take        # reset and run the proactive demo
 - **`jev-damage-control` is a guard, not a sandbox.** It sends each command to a third-party API, and when Jev is unreachable the command runs.
 - **The proactive demo has no login** and its agents run `bash`. It binds `127.0.0.1` unless you pass `--host 0.0.0.0`.
 - **macOS devices run as a LaunchAgent** in the logged-in session, so unattended reboots need auto-login.
-- **pi-durable is experimental.** This repo pins 1.0.3.
+- **pi-durable is experimental.** `dpi-backend` and `proactive-dpi-demo` pin pi-durable, pi-ai and chord at 1.4.0 (this fork; upstream pins 1.0.3). `proactive-dpi-demo` is on 1.4.0 too. Only `dpi-tui`'s `pi-tui` is still on 1.0.3.
+- **The move to pi-durable 1.4.0 migrates SQLite one way.** The first time 1.4.0 opens a session database it upgrades it to schema v2, and 1.3.0 or earlier can't open it again. Back up `~/.dpi` (or your device's data directory) before the first start, or begin on a fresh database.
+- **A task that crashes five times in a row is parked** (`restart_limit`) until `retryTask`, a 1.4.0 behaviour. Set `settings.restartLimit` to `Infinity` for the old one.
 
 ---
 

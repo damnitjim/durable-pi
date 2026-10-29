@@ -14,9 +14,9 @@
     "build": "vue-tsc --noEmit -p apps/proactive-dpi-fe/tsconfig.json && tsc --noEmit -p apps/proactive-dpi-be/tsconfig.json && tsc --noEmit -p apps/proactive-dpi-logs/tsconfig.json && vite build --config apps/proactive-dpi-fe/vite.config.ts"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.0.3",
-    "@earendil-works/pi-ai": "1.0.3",
-    "@earendil-works/pi-durable": "1.0.3",
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
     "dompurify": "^3.2.0",
     "express": "^5.1.0",
     "lucide-vue-next": "^0.468.0",
