@@ -218,7 +218,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
     ext = await store.setExtension(row, c, { name: "system-prompts", enabled: false });
-    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true]);
+    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true, false]);
     await assert.rejects(() => store.setExtension(row, c, { name: "nope", enabled: true }), /Unknown extension/);
   } finally {
     await store.close();
