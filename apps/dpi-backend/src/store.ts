@@ -59,6 +59,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createPlayground, Workspace, type SpawnSession } from "./extensions.js";
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
+import { createGuard } from "./guard.js";
 import { createSkills } from "./skills.js";
 import { ADDON_INFO, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
@@ -95,6 +96,8 @@ export interface StoreOptions {
   provider: "pi" | "faux";
   /** Loaded from pi's agent folder by `loadPiModels()`; required unless the provider is "faux". */
   pi?: PiModels;
+  /** The guard's `allow`/`ask` file; default `~/.durable-jim-agent/guard.json`. */
+  guardFile?: string;
 }
 
 /** Agent documents a client may read or stream, by kind. */
@@ -510,6 +513,8 @@ export class Store {
       registry.install(skills);
       const askUser = createAskUser();
       registry.install(askUser);
+      const guard = createGuard({ guardFile: this.options.guardFile });
+      registry.install(guard);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
       const addons = createAddons({ offline: this.options.provider === "faux" });
       for (const extension of addons.list) registry.install(extension);
@@ -524,7 +529,7 @@ export class Store {
             await tx.doc(JobRuns, c.id);
           },
           settings: {
-            extensions: [CodingTools, playground, skills, askUser],
+            extensions: [CodingTools, playground, skills, askUser, guard],
             // Read at every use, so a PATCH .../compaction applies from the next request.
             get compaction() {
               return compaction();
