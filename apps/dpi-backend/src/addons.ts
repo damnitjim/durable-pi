@@ -33,6 +33,7 @@ export const PromptChecklist = defineDoc<{ enabled: string[] }>({
   history: "latest",
   fork: "current",
   initial: () => ({ enabled: [PROMPTS[0].id] }),
+  checkpointWhen: () => false,
 });
 
 // ------------------------------------------------------------------ jev-damage-control
