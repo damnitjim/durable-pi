@@ -211,7 +211,8 @@ export interface AgentDetail extends AgentSummary {
 export interface CreateSessionBody {
   name: string;
   cwd: string;
-  model: { provider: string; modelId: string };
+  /** Omitted: the device default (pi's default model). */
+  model?: { provider: string; modelId: string };
   thinkingLevel?: ThinkingLevel;
 }
 

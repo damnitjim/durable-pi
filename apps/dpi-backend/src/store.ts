@@ -37,9 +37,8 @@ import { join, dirname, resolve } from "node:path";
 import { homedir, hostname, platform } from "node:os";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { curatedModels, defaultModelId } from "./model-catalog.js";
+import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
+import type { PiModels } from "./pi-models.js";
 import { fauxModels, installFaux } from "./faux.js";
 import { ATTENTION_DOC, AttentionDoc, createAskUser } from "./ask-user.js";
 import {
@@ -92,7 +91,10 @@ export interface StoreOptions {
   dataDir: string;
   startDirs: string[];
   name: string;
-  provider: "openrouter" | "faux";
+  /** "pi" reuses pi's credentials and default model (`pi` below); "faux" is the scripted test model. */
+  provider: "pi" | "faux";
+  /** Loaded from pi's agent folder by `loadPiModels()`; required unless the provider is "faux". */
+  pi?: PiModels;
 }
 
 /** Agent documents a client may read or stream, by kind. */
@@ -143,7 +145,7 @@ const decodeCursor = (cursor?: string) => {
 };
 
 export class Store {
-  readonly models = createModels();
+  readonly models: MutableModels;
   readonly opened = new Map<string, Opened>();
   readonly errors = new Map<string, string>();
   readonly catalog: DatabaseSync;
@@ -179,16 +181,12 @@ export class Store {
   }
 
   private constructor(readonly options: StoreOptions) {
-    if (options.provider === "faux") installFaux(this.models);
-    else {
-      const provider = openrouterProvider();
-      const catalog = provider.getModels();
-      for (const model of curatedModels)
-        if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
-      this.models.setProvider({
-        ...provider,
-        getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
-      });
+    if (options.provider === "faux") {
+      this.models = createModels();
+      installFaux(this.models);
+    } else {
+      if (!options.pi) throw Error("provider \"pi\" needs pi's models (loadPiModels)");
+      this.models = options.pi.models;
     }
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.unlockCatalog = lockFile(`${this.catalogPath}.lock`);
@@ -266,7 +264,7 @@ export class Store {
   }
 
   private defaultModel() {
-    return this.options.provider === "faux" ? fauxModels[0].id : defaultModelId;
+    return this.options.provider === "faux" ? fauxModels[0].id : this.options.pi!.defaultModel.modelId;
   }
 
   private async loadModels(): Promise<ModelInfo[]> {
@@ -281,49 +279,45 @@ export class Store {
         reasoning: false,
         cost: { input: 0, output: 0 },
       }));
-    const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
-    return curatedModels.flatMap((c) => {
-      const m = available.find((m) => m.id === c.id);
-      return m
-        ? [
-            {
-              id: m.id,
-              provider: "openrouter",
-              name: c.name,
-              tier: c.tier,
-              icon: c.icon,
-              contextWindow: m.contextWindow,
-              reasoning: m.reasoning,
-              cost: { input: m.cost.input, output: m.cost.output },
-            },
-          ]
-        : [];
-    });
+    const available = await this.models.getAvailable(undefined, { signal: AbortSignal.timeout(10000) });
+    return available.map((m) => ({
+      id: m.id,
+      provider: m.provider,
+      name: m.name,
+      tier: "",
+      icon: "lab.png",
+      contextWindow: m.contextWindow,
+      reasoning: m.reasoning,
+      cost: { input: m.cost.input, output: m.cost.output },
+    }));
   }
 
+  /** The model a stored agent runs on after a restart: its own if it is still available, else pi's default. */
   routedModel(model?: ModelRef): ModelRef {
     if (this.options.provider === "faux") {
       const id = fauxModels.some((m) => m.id === model?.modelId) ? model!.modelId : fauxModels[0].id;
       return { provider: "faux", modelId: id };
     }
-    const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
-    return {
-      provider: "openrouter",
-      modelId: curatedModels.some((m) => m.id === exact) ? exact : defaultModelId,
-    };
+    const available = model && this.modelList.some((m) => m.provider === model.provider && m.id === model.modelId);
+    return available ? model : this.options.pi!.defaultModel;
   }
 
-  validateModel(model: unknown): ModelRef {
+  /** A `{ provider, modelId }` (or nothing, meaning pi's default) → a model sessions can run. */
+  async validateModel(model: unknown): Promise<ModelRef> {
+    if (this.options.provider !== "faux" && model === undefined) return this.options.pi!.defaultModel;
     const m = model as ModelRef | undefined;
     if (!m || typeof m.provider !== "string" || typeof m.modelId !== "string")
       throw invalid("model must be { provider, modelId }");
-    const known =
-      this.options.provider === "faux"
-        ? m.provider === "faux" && fauxModels.some((f) => f.id === m.modelId)
-        : m.provider === "openrouter" &&
-          curatedModels.some((c) => c.id === m.modelId) &&
-          !!this.models.getModel(m.provider, m.modelId);
-    if (!known) throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
+    if (this.options.provider === "faux") {
+      if (m.provider !== "faux" || !fauxModels.some((f) => f.id === m.modelId))
+        throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
+    } else {
+      try {
+        await this.options.pi!.resolve(m);
+      } catch (e) {
+        throw invalid(`${(e as Error).message}. Choose one from GET /v1/device models`);
+      }
+    }
     return { provider: m.provider, modelId: m.modelId };
   }
 
@@ -406,7 +400,7 @@ export class Store {
     } catch {
       throw invalid(`cwd must be an existing folder on ${this.name}`);
     }
-    const model = this.validateModel(body.model);
+    const model = await this.validateModel(body.model);
     if (body.thinkingLevel !== undefined && !THINKING_LEVELS.includes(body.thinkingLevel))
       throw invalid("Invalid thinking level");
     const id = randomUUID();
@@ -771,7 +765,7 @@ export class Store {
   }
 
   async configure(row: SessionRow, c: Conversation, body: Record<string, unknown>) {
-    const model = body.model === undefined ? undefined : this.validateModel(body.model);
+    const model = body.model === undefined ? undefined : await this.validateModel(body.model);
     if (body.thinkingLevel !== undefined && !THINKING_LEVELS.includes(body.thinkingLevel as ThinkingLevel))
       throw invalid("Invalid thinking level");
     if (body.instructions !== undefined && typeof body.instructions !== "string")
@@ -802,7 +796,7 @@ export class Store {
     if (model && (c.id as number) === 1)
       this.catalog.prepare("UPDATE sessions SET model=?,provider=? WHERE id=?").run(model.modelId, model.provider, row.id);
     // Thresholds are shared by the session's agents; refit them when this model's window is too small for them.
-    const window = model ? this.windowOf(model.modelId) : 0;
+    const window = model ? this.windowOf(model.modelId, model.provider) : 0;
     if (window && !compactionFits(window, this.compactionOf(row.id))) {
       const fitted = defaultCompaction(window);
       this.setCompaction(row, { reserveTokens: fitted.reserveTokens, backgroundTokens: fitted.backgroundTokens });
@@ -997,8 +991,8 @@ export class Store {
 
   // ------------------------------------------------------------ compaction settings (per session)
 
-  private windowOf(modelId: string) {
-    return this.modelList.find((m) => m.id === modelId)?.contextWindow ?? 0;
+  private windowOf(modelId: string, provider?: string) {
+    return this.modelList.find((m) => m.id === modelId && (!provider || m.provider === provider))?.contextWindow ?? 0;
   }
 
   /** Saved thresholds, or the defaults for the session model's window (200k background, 250k wait when it fits). */

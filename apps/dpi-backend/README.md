@@ -13,9 +13,19 @@ Needs Node 22.19 or newer (`.nvmrc` pins 24).
 ```bash
 cd apps/dpi-backend && npm install
 npm run token                  # creates ~/.dpi/backend.env with DPI_TOKEN and prints it (npm run token -- --rotate replaces it)
-echo "OPENROUTER_API_KEY=sk-or-..." >> ~/.dpi/backend.env
+# models and keys come from pi: log in or set a default with `pi` first (see "Models and credentials")
 npm start                      # 127.0.0.1:4780; data in ~/.dpi/backend
 ```
+
+### Models and credentials
+
+The Backend reuses `pi`'s setup, read from `$PI_CODING_AGENT_DIR` (default `~/.pi/agent`) and never written to:
+
+- `auth.json`: API keys, including `!command` entries (run once, output cached). Provider environment variables still work for providers with nothing stored.
+- `settings.json`: `defaultProvider` and `defaultModel`. A session created without a `model` uses it; a `provider/model` override names another (split at the first `/`).
+- `models.json`: custom endpoints (Ollama, llama.cpp, a proxy), keyed with a literal, `$ENV` or `!command`. A key in `auth.json` wins.
+
+It refuses to start, saying why, if pi has no default model, the default provider has no key, or the default provider only has an OAuth login (sharing one would log pi or the Backend out): add an API key for it, or change pi's default.
 
 With the repo's network config, `just net up local && just backend run` does the same thing. `just backend run` first stops whatever already listens on the backend's port.
 
@@ -30,8 +40,8 @@ With the repo's network config, `just net up local && just backend run` does the
 | `DPI_DATA_DIR` | `$DPI_HOME/backend` | catalog, app state, `sessions/`, `archive/` |
 | `DPI_HOME` | `~/.dpi` | where `backend.env` is read (set by the service unit) |
 | `DPI_ENV_FILE` | `$DPI_HOME/backend.env` | the env file to read |
-| `DPI_PROVIDER` | `openrouter` | `faux` gives a free deterministic model for tests |
-| `OPENROUTER_API_KEY` | | model access, required unless `DPI_PROVIDER=faux`. Without it the device lists no models. Never sent to clients |
+| `DPI_PROVIDER` | `pi` | `pi` reuses pi's credentials and default model; `faux` gives a free deterministic model for tests |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | pi's agent folder: `settings.json`, `auth.json`, `models.json` |
 | `TYPESAFE_API_KEY` | | optional: `jev-damage-control` asks Jev with it, else through OpenRouter |
 
 Flags `--port`, `--host`, `--name`, `--start-dirs`, `--data-dir` and `--env-file` override the env.
