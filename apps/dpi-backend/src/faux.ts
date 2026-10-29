@@ -90,8 +90,10 @@ export function installFaux(models: MutableModels) {
     if (prompt.startsWith("page:")) return call("ping_on_call_engineer", { summary: prompt.slice(5).trim() });
     if (prompt.startsWith("Release check:"))
       return call("bash", { command: "git log --oneline -5 2>/dev/null || echo 'no git history'; ls | head -5" });
-    if (prompt.startsWith("manage:")) {
-      const m = prompt.slice(7).trim().match(/^(\S+)\s*(\{[\s\S]*\})?$/);
+    // The Manager's messages start with a "[Sent <time>, timezone]" line; the script follows it.
+    const script = prompt.replace(/^\[Sent [^\]]*\]\n/, "");
+    if (script.startsWith("manage:")) {
+      const m = script.slice(7).trim().match(/^(\S+)\s*(\{[\s\S]*\})?$/);
       return call(m?.[1] ?? "", m?.[2] ? JSON.parse(m[2]) : {});
     }
     if (prompt.startsWith("fail:"))

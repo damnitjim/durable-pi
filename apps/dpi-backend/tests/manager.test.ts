@@ -267,3 +267,14 @@ test("a confirmation times out as a no after half an hour, not the 12 hours of a
     await m.close();
   }
 });
+
+test("a Manager message that starts with the sender's time line still runs its script", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    const out = (await m.settle(await m.say("[Sent Thursday, October 29, 2026 (2026-10-29T20:15:00.000Z); the user's timezone is America/Chicago.]\nmanage: list_jobs"))).answer!.text;
+    assert.match(out, /Daily Digest/);
+  } finally {
+    await m.close();
+  }
+});
