@@ -12,6 +12,7 @@
 //   "write: <path>"  → one write call;  "edit: <path>" → one edit call (hello → bye)
 //   "Release check: …" (the release-check job's subagent) → one bash call
 //   "fail: <message>" → a turn that ends in an error with that message
+//   "manage: <tool> [<json arguments>]" → one call of a Manager job tool (durable-jim-manager)
 //   anything else  → "Echo: <text>"
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import {
@@ -89,6 +90,10 @@ export function installFaux(models: MutableModels) {
     if (prompt.startsWith("page:")) return call("ping_on_call_engineer", { summary: prompt.slice(5).trim() });
     if (prompt.startsWith("Release check:"))
       return call("bash", { command: "git log --oneline -5 2>/dev/null || echo 'no git history'; ls | head -5" });
+    if (prompt.startsWith("manage:")) {
+      const m = prompt.slice(7).trim().match(/^(\S+)\s*(\{[\s\S]*\})?$/);
+      return call(m?.[1] ?? "", m?.[2] ? JSON.parse(m[2]) : {});
+    }
     if (prompt.startsWith("fail:"))
       // Streams a partial reply first, as a real provider failing mid-turn does; the device stream samples `busy`, so a turn that errors instantly is not noticed.
       return fauxAssistantMessage(fauxText("Working on it. ".repeat(100)), { stopReason: "error", errorMessage: prompt.slice(5).trim() });
