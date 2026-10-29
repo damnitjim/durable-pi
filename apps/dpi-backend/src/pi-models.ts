@@ -47,6 +47,8 @@ function commandRunner() {
           else resolve(value);
         });
       });
+      // A failure isn't remembered: a locked keychain may be unlocked by the next try.
+      result.catch(() => cache.delete(command));
       cache.set(command, result);
     }
     return result;
@@ -59,6 +61,10 @@ async function resolveValue(raw: string, env: NodeJS.ProcessEnv, run: Run): Prom
   const name = /^\$\{(\w+)\}$|^\$(\w+)$/.exec(raw);
   return name ? env[name[1] ?? name[2]] : raw;
 }
+
+const oauthRefusal = (provider: string) =>
+  `pi is logged in to ${provider} with OAuth only, and the Backend can't share an OAuth login without logging one of you out. ` +
+  `Add an API key for ${provider} (in pi's auth.json or the provider's environment variable), or pick another default model in pi.`;
 
 // ------------------------------------------------------------------ pi's files
 
@@ -84,6 +90,8 @@ class PiCredentialStore implements CredentialStore {
   }
   async read(id: string) {
     const credential = this.#current(id);
+    // Never handed to pi-ai: it would refresh the token, and the refresh invalidates pi's copy.
+    if (credential?.type === "oauth") return undefined;
     if (credential?.type !== "api_key" || !credential.key?.startsWith("!")) return credential;
     try {
       return { ...credential, key: await this.run(credential.key.slice(1)) } satisfies ApiKeyCredential;
@@ -93,7 +101,7 @@ class PiCredentialStore implements CredentialStore {
   }
   async list() {
     return Object.keys(this.stored)
-      .filter((id) => this.#current(id))
+      .filter((id) => this.#current(id)?.type === "api_key")
       .map((providerId) => ({ providerId, type: this.#current(providerId)!.type }));
   }
   async modify(id: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>) {
@@ -193,14 +201,12 @@ export async function loadPiModels(
       fileExists: async (path) => existsSync(path.replace(/^~(?=\/|$)/, homedir())),
     },
   });
+  for (const id of Object.keys(custom))
+    if (models.getProvider(id))
+      throw new Error(`models.json: "${id}" is a built-in provider; the Backend can't override built-in providers yet, so use a new provider name.`);
   for (const [id, config] of Object.entries(custom)) models.setProvider(customProvider(id, config, env, run));
 
   const known = async (ref: ModelRef) => {
-    if (stored[ref.provider]?.type === "oauth")
-      throw new Error(
-        `pi is logged in to ${ref.provider} with OAuth only, and the Backend can't share an OAuth login without logging one of you out. ` +
-          `Add an API key for ${ref.provider} (in pi's auth.json or the provider's environment variable), or pick another default model in pi.`,
-      );
     if (!models.getModel(ref.provider, ref.modelId)) throw new Error(`Unknown model ${ref.provider}/${ref.modelId}`);
     let auth;
     try {
@@ -208,6 +214,7 @@ export async function loadPiModels(
     } catch (e) {
       throw new Error(`Could not get an API key for ${ref.provider}: ${(e as Error).message}`);
     }
+    if (!auth && stored[ref.provider]?.type === "oauth") throw new Error(oauthRefusal(ref.provider));
     if (!auth) throw new Error(`There is no API key for ${ref.provider}: add one in pi's auth.json or set its environment variable.`);
     return ref;
   };

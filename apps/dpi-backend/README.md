@@ -23,7 +23,7 @@ The Backend reuses `pi`'s setup, read from `$PI_CODING_AGENT_DIR` (default `~/.p
 
 - `auth.json`: API keys, including `!command` entries (run once, output cached). Provider environment variables still work for providers with nothing stored.
 - `settings.json`: `defaultProvider` and `defaultModel`. A session created without a `model` uses it; a `provider/model` override names another (split at the first `/`).
-- `models.json`: custom endpoints (Ollama, llama.cpp, a proxy), keyed with a literal, `$ENV` or `!command`. A key in `auth.json` wins.
+- `models.json`: custom endpoints (Ollama, llama.cpp, a proxy), keyed with a literal, `$ENV` or `!command`. A key in `auth.json` wins. A provider name that matches a built-in one (`anthropic`…) is refused at startup: overrides of built-ins aren't supported yet.
 
 It refuses to start, saying why, if pi has no default model, the default provider has no key, or the default provider only has an OAuth login (sharing one would log pi or the Backend out): add an API key for it, or change pi's default.
 

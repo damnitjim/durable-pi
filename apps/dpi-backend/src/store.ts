@@ -284,7 +284,7 @@ export class Store {
       id: m.id,
       provider: m.provider,
       name: m.name,
-      tier: "",
+      tier: "pi",
       icon: "lab.png",
       contextWindow: m.contextWindow,
       reasoning: m.reasoning,
@@ -304,7 +304,8 @@ export class Store {
 
   /** A `{ provider, modelId }` (or nothing, meaning pi's default) → a model sessions can run. */
   async validateModel(model: unknown): Promise<ModelRef> {
-    if (this.options.provider !== "faux" && model === undefined) return this.options.pi!.defaultModel;
+    if (model === undefined || model === null)
+      return this.options.provider === "faux" ? { provider: "faux", modelId: fauxModels[0].id } : this.options.pi!.defaultModel;
     const m = model as ModelRef | undefined;
     if (!m || typeof m.provider !== "string" || typeof m.modelId !== "string")
       throw invalid("model must be { provider, modelId }");

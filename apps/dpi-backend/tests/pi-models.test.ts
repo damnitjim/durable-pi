@@ -115,7 +115,7 @@ test("refuses to start when the default provider has only an OAuth login", async
   });
   try {
     await assert.rejects(
-      () => loadPiModels({ agentDir: t.dir, env: { ANTHROPIC_API_KEY: "ignored" } as NodeJS.ProcessEnv }),
+      () => loadPiModels({ agentDir: t.dir, env: noEnv }),
       (e: Error) => /anthropic/.test(e.message) && /OAuth/.test(e.message) && /add an API key/i.test(e.message),
     );
   } finally {
@@ -168,6 +168,34 @@ test("custom endpoints from models.json work as the default, with a literal, $EN
     } finally {
       await t.cleanup();
     }
+  }
+});
+
+test("an OAuth login is ignored when a key is available for the same provider, and refused only when it is all there is", async () => {
+  const oauth = { type: "oauth", access: "a", refresh: "r", expires: 1 };
+  const t = await agentDir({
+    settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" },
+    auth: { openai: oauth },
+  });
+  try {
+    const pi = await loadPiModels({ agentDir: t.dir, env: { OPENAI_API_KEY: "sk-env" } as NodeJS.ProcessEnv });
+    assert.equal(await apiKeyOf(pi, "openai"), "sk-env");
+    await assert.rejects(() => loadPiModels({ agentDir: t.dir, env: noEnv }), /OAuth.*add an API key|Add an API key/is);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a models.json provider named like a built-in one is refused", async () => {
+  const t = await agentDir({
+    settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" },
+    auth: { openai: { type: "api_key", key: "k" } },
+    models: { providers: { openai: { baseUrl: "http://x/v1", api: "openai-completions", models: [{ id: "m" }] } } },
+  });
+  try {
+    await assert.rejects(() => loadPiModels({ agentDir: t.dir, env: noEnv }), /"openai" is a built-in provider/);
+  } finally {
+    await t.cleanup();
   }
 });
 
