@@ -6,7 +6,7 @@ import { DEVICE_DOC_KINDS, type SessionRow, type Store } from "./store.js";
 import { agentStream, deviceStream, sessionStream } from "./streams.js";
 import { idempotent } from "./idempotency.js";
 import { invalid } from "./errors.js";
-import { answerQuestion } from "./ask-user.js";
+import { answerQuestion, setAttention } from "./ask-user.js";
 
 type Async = (req: Request, res: Response) => Promise<unknown>;
 const route = (fn: Async) => (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
@@ -173,6 +173,7 @@ export function v1(store: Store) {
     `${a}/questions/:id/answer`,
     route(async (req, res) => res.json(await answerQuestion(L(res).h, L(res).c, param(req, "id"), req.body?.answer))),
   );
+  r.put(`${a}/attention`, route(async (req, res) => res.json(await setAttention(L(res).c, req.body))));
 
   // ---------------------------------------------------------- demo extension
   r.post(`${a}/demo/state`, route(async (req, res) => res.json(await store.demoState(L(res).c, req.body ?? {}))));

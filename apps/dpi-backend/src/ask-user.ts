@@ -136,6 +136,23 @@ export async function answerQuestion(h: Harness, c: Conversation, id: string, an
   return { ok: true as const, question };
 }
 
+/** Sets what the Scheduler controls in the document: `trusted` and `answerBy` (null removes it). Questions and notices are left alone. */
+export async function setAttention(c: Conversation, body: unknown) {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) throw invalid("body must be an object with trusted and/or answerBy");
+  const { trusted, answerBy } = body as { trusted?: unknown; answerBy?: unknown };
+  if (trusted === undefined && answerBy === undefined) throw invalid("set trusted and/or answerBy");
+  if (trusted !== undefined && typeof trusted !== "boolean") throw invalid("trusted must be true or false");
+  if (answerBy !== undefined && answerBy !== null && !(typeof answerBy === "number" && Number.isFinite(answerBy) && answerBy > 0))
+    throw invalid("answerBy must be a time in ms since epoch, or null");
+  return c.commit(async (tx) => {
+    const doc = await tx.doc(AttentionDoc, c.id);
+    if (trusted !== undefined) doc.trusted = trusted;
+    if (answerBy === null) delete doc.answerBy;
+    else if (answerBy !== undefined) doc.answerBy = answerBy;
+    return { ok: true as const, trusted: doc.trusted ?? false, answerBy: doc.answerBy ?? null };
+  }, BACKGROUND_CONTEXT);
+}
+
 /** Asks the question and waits, durably, for its answer. Also how the guard asks for approval. Replay finds the question this call already asked. */
 export async function askAndWait(
   args: { question: string; choices?: string[]; timeout?: number },

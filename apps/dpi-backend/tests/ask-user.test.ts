@@ -16,6 +16,7 @@ import {
   NO_ANSWER,
   REMINDER_MS,
   answerQuestion,
+  setAttention,
   createAskUser,
   type Attention,
 } from "../src/ask-user.js";
@@ -341,6 +342,78 @@ test("the answer route: authenticated, first answer wins, a second gets 409, an 
     const body = (await done.json()) as { status: string; answer?: { text: string } };
     assert.equal(body.status, "done");
     assert.match(body.answer!.text, /Tool finished: Approve/);
+  } finally {
+    await server.stop();
+    await t.cleanup();
+  }
+});
+
+test("setAttention merges trusted and answerBy, keeps questions and notices, and null clears answerBy", async () => {
+  const t = await setup();
+  try {
+    const turn = await t.say("ask: Ship it? | Approve | Deny");
+    const q = await t.question();
+    await setAttention(t.c, { trusted: true, answerBy: t.clock.now() + 60_000 });
+    let doc = await t.doc();
+    assert.equal(doc.trusted, true);
+    assert.equal(doc.answerBy, t.clock.now() + 60_000);
+    assert.equal(doc.questions[q.id].status, "pending", "the question survives");
+
+    await setAttention(t.c, { trusted: false, answerBy: null });
+    doc = await t.doc();
+    assert.equal(doc.trusted, false);
+    assert.ok(!("answerBy" in doc), "null removes the field");
+    assert.equal(doc.questions[q.id].status, "pending");
+
+    await setAttention(t.c, { trusted: true });
+    assert.equal((await t.doc()).trusted, true);
+    await answerQuestion(t.harness, t.c, q.id, "Approve");
+    await t.reply(turn);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("setAttention refuses a body with nothing to set or a bad value", async () => {
+  const t = await setup();
+  try {
+    for (const body of [{}, { trusted: "yes" }, { answerBy: "soon" }, { answerBy: -1 }, { answerBy: Number.NaN }, null, "x"]) {
+      await assert.rejects(() => setAttention(t.c, body), /trusted|answerBy|body/, JSON.stringify(body));
+    }
+    assert.deepEqual(await t.doc(), { seq: 0, questions: {}, notices: [] });
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("the attention route: authenticated, sets trusted and answerBy, validates, and 404s an unknown session", async () => {
+  const t = await tempStore();
+  const token = newToken();
+  const server = await bootServer({ home: join(t.root, "home"), startDirs: t.work, token });
+  const call = (path: string, init: RequestInit = {}) =>
+    fetch(`${server.base}/v1${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    });
+  try {
+    const created = await (await call("/sessions", { method: "POST", body: JSON.stringify({ name: "Att", cwd: t.work, model: faux }) })).json();
+    const base = `/sessions/${created.id}/agents/main`;
+    const put = (b: unknown, path = `${base}/attention`) => call(path, { method: "PUT", body: JSON.stringify(b) });
+
+    assert.equal((await fetch(`${server.base}/v1${base}/attention`, { method: "PUT" })).status, 401);
+    assert.equal((await put({})).status, 400);
+    assert.equal((await put({ trusted: true }, "/sessions/nope/agents/main/attention")).status, 404);
+
+    const ok = await put({ trusted: true, answerBy: 4_000_000_000_000 });
+    assert.equal(ok.status, 200);
+    const read = async () => ((await (await call(`${base}/docs/jim.attention`)).json()) as { value: Attention }).value;
+    assert.equal((await read()).trusted, true);
+    assert.equal((await read()).answerBy, 4_000_000_000_000);
+
+    assert.equal((await put({ trusted: false, answerBy: null })).status, 200);
+    const cleared = await read();
+    assert.equal(cleared.trusted, false);
+    assert.ok(!("answerBy" in cleared));
   } finally {
     await server.stop();
     await t.cleanup();

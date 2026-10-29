@@ -44,6 +44,7 @@ The contract every Durable Agent Network client uses: the web hub, `dpi-tui`, sc
 | `POST .../agents/:a/compact` | `{instructions?}` | `{taskId}` |
 | `POST .../agents/:a/reset` | `{note?}` | `{ok}` |
 | `GET .../agents/:a/docs/:kind` | `demo.job-runs` | `{kind, value}` |
+| `PUT .../agents/:a/attention` | `{trusted?: boolean, answerBy?: number\|null}` (at least one) | `{ok, trusted, answerBy}`. Merges into the conversation document `jim.attention` and leaves its questions and notices alone. `trusted` makes the guard skip its approval step (never its workspace limit); `answerBy` (ms since epoch) caps how long any question waits, and `null` removes the cap. The Scheduler sets both before a run and resets them after |
 | `POST .../agents/:a/demo/state` | `{operation, path, value?, expectedRevision?}` | `{ok, value, revision}`: the new App State. A stale `expectedRevision` returns `409 conflict` |
 | `POST .../agents/:a/demo/jobs` | `{job, input?}` | `201 {taskId}`: a durable job run the conversation owns in the background, anchored by a `demo.job` entry |
 | `POST .../agents/:a/demo/jobs/:taskId/approval` | `{approved}` | `{ok}`; `409 conflict` when the run is not waiting |
