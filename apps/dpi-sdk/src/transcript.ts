@@ -212,6 +212,22 @@ export function lastAssistantText(entries: readonly WireEntry[]): string | undef
   return undefined;
 }
 
+/** Why the last turn failed, if it did: the final assistant entry ended in an error. `lastAction` is the last tool call the turn made. */
+export function lastFailure(entries: readonly WireEntry[]): { error: string; lastAction?: string } | undefined {
+  let lastAction: string | undefined;
+  let last: WireAssistantMessage | undefined;
+  for (const entry of entries) {
+    if (entry.kind === "pi.user") lastAction = undefined; // only the failing turn's own tool calls count
+    if (entry.kind !== "pi.assistant") continue;
+    for (const message of (entry.model ?? []).filter(isAssistant)) {
+      last = message;
+      for (const block of message.content) if (block.type === "toolCall") lastAction = `${block.name} ${JSON.stringify(block.arguments)}`.slice(0, 200);
+    }
+  }
+  if (last?.stopReason !== "error") return undefined;
+  return { error: last.errorMessage || "The agent ended with an error", ...(lastAction ? { lastAction } : {}) };
+}
+
 export interface UsageSummary {
   tokens: number;
   cost: number;
