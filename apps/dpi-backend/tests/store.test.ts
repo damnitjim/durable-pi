@@ -184,7 +184,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
 
     let ext = await store.extensionsOf(row, c);
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false]]);
-    assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "playground"]);
+    assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "playground", "skills"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
     // jev-damage-control (offline rules under the faux provider) blocks the delete; turned off, it runs.
@@ -211,7 +211,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true]]);
-    assert.deepEqual(ext.builtIn, ["coding-tools", "playground"]);
+    assert.deepEqual(ext.builtIn, ["coding-tools", "playground", "skills"]);
     await mkdir(join(t.work, "doomed"));
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));

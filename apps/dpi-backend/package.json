@@ -16,7 +16,8 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
     "express": "^5.1.0",
-    "tsx": "^4.20.0"
+    "tsx": "^4.20.0",
+    "yaml": "^2.8.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

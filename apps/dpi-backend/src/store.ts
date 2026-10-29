@@ -59,6 +59,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createPlayground, Workspace, type SpawnSession } from "./extensions.js";
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
+import { createSkills } from "./skills.js";
 import { ADDON_INFO, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
 
@@ -509,6 +510,8 @@ export class Store {
       const compaction = () => this.compactionOf(row.id);
       const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs);
       registry.install(playground);
+      const skills = createSkills();
+      registry.install(skills);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
       const addons = createAddons({ offline: this.options.provider === "faux" });
       for (const extension of addons.list) registry.install(extension);
@@ -523,7 +526,7 @@ export class Store {
             await tx.doc(JobRuns, c.id);
           },
           settings: {
-            extensions: [CodingTools, playground],
+            extensions: [CodingTools, playground, skills],
             // Read at every use, so a PATCH .../compaction applies from the next request.
             get compaction() {
               return compaction();
