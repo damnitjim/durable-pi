@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, hook, section, ToolTask, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import { askAndWait, NO_ANSWER } from "./ask-user.js";
 
@@ -14,30 +14,34 @@ export const MANAGER_EXTENSION = "durable-jim-manager";
 
 /** The Scheduler, as these tools need it: one call that returns the parsed reply or throws with the Scheduler's own message. */
 export interface SchedulerApi {
-  request(method: string, path: string, body?: unknown): Promise<any>;
+  request(method: string, path: string, body?: unknown, approval?: string): Promise<any>;
 }
 
-/** Where the Scheduler listens: `DURABLE_JIM_URL` and `DURABLE_JIM_TOKEN` (as for its other clients), else the `client.json` it writes in its state directory. */
+/**
+ * Where the Scheduler listens, and the Manager's own credential for it: `DURABLE_JIM_URL` and `DURABLE_JIM_MANAGER_TOKEN`,
+ * else the `client.json` the Scheduler writes in its state directory. Never the Scheduler's full `token`: with the
+ * Manager's credential a change goes through only with the id of a question the user approved (`x-approval`).
+ */
 export function schedulerFromEnvironment(env: NodeJS.ProcessEnv = process.env): SchedulerApi {
   const endpoint = () => {
-    if (env.DURABLE_JIM_URL && env.DURABLE_JIM_TOKEN) return { url: env.DURABLE_JIM_URL, token: env.DURABLE_JIM_TOKEN };
+    if (env.DURABLE_JIM_URL && env.DURABLE_JIM_MANAGER_TOKEN) return { url: env.DURABLE_JIM_URL, token: env.DURABLE_JIM_MANAGER_TOKEN };
     try {
       const file = JSON.parse(readFileSync(join(env.DURABLE_JIM_HOME ?? join(homedir(), ".durable-jim-agent"), "client.json"), "utf8"));
-      if (typeof file.url === "string" && typeof file.token === "string") return { url: file.url, token: file.token };
+      if (typeof file.url === "string" && typeof file.managerToken === "string") return { url: file.url, token: file.managerToken };
     } catch {
       // Falls through to the one message below.
     }
-    throw new Error("Can't find the Scheduler. Is it running?");
+    throw new Error("Can't find the Scheduler (or its Manager credential). Is it running, and up to date?");
   };
   return {
-    async request(method, path, body) {
+    async request(method, path, body, approval) {
       // Read on every call: the Scheduler may have restarted on another port.
       const { url, token } = endpoint();
       let response: Response;
       try {
         response = await fetch(`${url}${path}`, {
           method,
-          headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+          headers: { authorization: `Bearer ${token}`, ...(approval ? { "x-approval": approval } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}) },
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(30_000),
         });
@@ -142,10 +146,12 @@ export const APPROVE = "Approve";
 export const DENY = "Deny";
 
 /** Show the user `body` and wait for their answer. True only for an explicit Approve; anything else is a no, with what they said. */
-async function confirm(title: string, body: string, api: ToolExecutionApi, context: Context): Promise<{ approved: boolean; said: string }> {
+async function confirm(title: string, body: string, api: ToolExecutionApi, context: Context): Promise<{ approved: boolean; said: string; questionId: string }> {
   const result = await askAndWait({ question: `${title}\n\n${body}`, choices: [APPROVE, DENY], timeout: CONFIRM_TIMEOUT_S }, api, context);
   const said = (result.output ?? []).map((part) => ("text" in part ? part.text : "")).join("").trim();
-  return { approved: !result.isError && said.toLowerCase() === APPROVE.toLowerCase(), said };
+  // The Scheduler checks that the user gave this answer, through their phone or pi, before it lets the change through.
+  const questionId = String((result.details as { questionId?: unknown } | undefined)?.questionId ?? "");
+  return { approved: !result.isError && said.toLowerCase() === APPROVE.toLowerCase(), said, questionId };
 }
 
 const NOT_DONE = (what: string, said: string) =>
@@ -194,9 +200,9 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       }),
       execute: guarded(async (args, api, context) => {
         const preview = (await scheduler.request("POST", "/jobs?dryRun=true", args)) as Preview;
-        const { approved, said } = await confirm("Save this job?", formatPreview(preview), api, context);
+        const { approved, said, questionId } = await confirm("Save this job?", formatPreview(preview), api, context);
         if (!approved) return NOT_DONE("saved", said);
-        const saved = (await scheduler.request("POST", "/jobs", args)) as Preview;
+        const saved = (await scheduler.request("POST", "/jobs", args, questionId)) as Preview;
         return text(`Saved job "${saved.name}". Next runs: ${saved.nextFireTimes.join(", ") || "none"}.`, { job: saved });
       }),
     }),
@@ -215,9 +221,9 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       execute: guarded(async ({ job, ...patch }, api, context) => {
         const found = findJob(await jobs(), job);
         const preview = (await scheduler.request("PATCH", `${jobPath(found.id)}?dryRun=true`, patch)) as Preview;
-        const { approved, said } = await confirm(`Change "${found.name}" like this?`, formatPreview(preview), api, context);
+        const { approved, said, questionId } = await confirm(`Change "${found.name}" like this?`, formatPreview(preview), api, context);
         if (!approved) return NOT_DONE("changed", said);
-        const saved = (await scheduler.request("PATCH", jobPath(found.id), patch)) as Preview;
+        const saved = (await scheduler.request("PATCH", jobPath(found.id), patch, questionId)) as Preview;
         return text(`Updated "${saved.name}". Next runs: ${saved.nextFireTimes.join(", ") || "none"}.`, { job: saved });
       }),
     }),
@@ -227,39 +233,45 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       parameters: byName,
       execute: guarded(async ({ job }, api, context) => {
         const found = findJob(await jobs(), job);
-        const { approved, said } = await confirm(`Delete "${found.name}"?`, `${formatJobLine(found)}\nPrompt: ${found.prompt}\n\nIts run history is kept.`, api, context);
+        const { approved, said, questionId } = await confirm(`Delete "${found.name}"?`, `${formatJobLine(found)}\nPrompt: ${found.prompt}\n\nIts run history is kept.`, api, context);
         if (!approved) return NOT_DONE("deleted", said);
-        await scheduler.request("DELETE", jobPath(found.id));
+        await scheduler.request("DELETE", jobPath(found.id), undefined, questionId);
         return text(`Deleted "${found.name}".`);
       }),
     }),
     defineTool({
       name: "run_job_now",
-      description: "Start a run of a job right now, without moving its schedule. Refused while its previous run is still active.",
+      description: "Start a run of a job right now, without moving its schedule. The user must approve. Refused while its previous run is still active.",
       parameters: byName,
-      execute: guarded(async ({ job }) => {
+      execute: guarded(async ({ job }, api, context) => {
         const found = findJob(await jobs(), job);
-        const run = (await scheduler.request("POST", `${jobPath(found.id)}/run`)) as Run;
+        const { approved, said, questionId } = await confirm(`Run "${found.name}" now?`, `${formatJobLine(found)}\nPrompt: ${found.prompt}`, api, context);
+        if (!approved) return NOT_DONE("started", said);
+        const run = (await scheduler.request("POST", `${jobPath(found.id)}/run`, undefined, questionId)) as Run;
         return text(`Started a run of "${found.name}" (${run.id}).`, { run });
       }),
     }),
     defineTool({
       name: "stop_run",
-      description: "Stop a job's active run.",
+      description: "Stop a job's active run. The user must approve.",
       parameters: byName,
-      execute: guarded(async ({ job }) => {
+      execute: guarded(async ({ job }, api, context) => {
         const found = findJob(await jobs(), job);
-        const run = (await scheduler.request("POST", `${jobPath(found.id)}/stop`)) as Run;
+        const { approved, said, questionId } = await confirm(`Stop the active run of "${found.name}"?`, formatJobLine(found), api, context);
+        if (!approved) return NOT_DONE("stopped", said);
+        const run = (await scheduler.request("POST", `${jobPath(found.id)}/stop`, undefined, questionId)) as Run;
         return text(`Stopped the run of "${found.name}" (${run.status}).`, { run });
       }),
     }),
     defineTool({
       name: "reset_job",
-      description: "Give a continuing job a fresh session; the old one is archived. Refused while a run is active.",
+      description: "Give a continuing job a fresh session; the old one is archived. The user must approve. Refused while a run is active.",
       parameters: byName,
-      execute: guarded(async ({ job }) => {
+      execute: guarded(async ({ job }, api, context) => {
         const found = findJob(await jobs(), job);
-        await scheduler.request("POST", `${jobPath(found.id)}/reset`);
+        const { approved, said, questionId } = await confirm(`Reset "${found.name}"?`, `${formatJobLine(found)}\n\nIts next run starts a new session; the old one is archived.`, api, context);
+        if (!approved) return NOT_DONE("reset", said);
+        await scheduler.request("POST", `${jobPath(found.id)}/reset`, undefined, questionId);
         return text(`Reset "${found.name}": its next run starts a new session.`);
       }),
     }),
@@ -313,17 +325,28 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
         if (hits.length === 0) return failure(`no pending question "${question}"`);
         if (hits.length > 1) return failure(`"${question}" matches more than one question (${hits.map((q) => q.id).join("; ")}); use the full id`);
         const found = hits[0]!;
-        const { approved, said } = await confirm("Send this answer?", `${found.question}${found.choices?.length ? `\nChoices: ${found.choices.join(" / ")}` : ""}\n\nAnswer: ${answer}`, api, context);
+        const { approved, said, questionId } = await confirm("Send this answer?", `${found.question}${found.choices?.length ? `\nChoices: ${found.choices.join(" / ")}` : ""}\n\nAnswer: ${answer}`, api, context);
         if (!approved) return NOT_DONE("answered", said);
-        await scheduler.request("POST", `/questions/${encodeURIComponent(found.id)}/answer`, { answer });
+        await scheduler.request("POST", `/questions/${encodeURIComponent(found.id)}/answer`, { answer }, questionId);
         return text(`Answered "${found.question}" with "${answer}".`);
       }),
     }),
   ];
 
+  const own = new Set(tools.map((t) => t.name));
   return defineExtension({
     name: MANAGER_EXTENSION,
     tools,
+    // The Manager is untrusted and has the Scheduler's credential for its tools in reach: it gets these tools and nothing
+    // else (no bash, no files, no state, no subagents), so it cannot read the Scheduler's or the Backend's credentials.
+    hooks: [
+      hook(ToolTask, {
+        beforeTool: async (call) => {
+          if (own.has(call.name)) return;
+          return { block: `The Manager can only use its job tools; "${call.name}" is not available to it.` };
+        },
+      }),
+    ],
     sections: [section(MANAGER_EXTENSION, () => MANAGER_PROMPT, { tag: false })],
   });
 }
@@ -333,5 +356,5 @@ export const MANAGER_PROMPT = [
   "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, run, stop and delete them with your tools. Be brief.",
   'Each message starts with a line in square brackets giving the time it was sent and the user\'s timezone. Turn times like "at 5" into the next such moment in that timezone, written as an ISO time with its offset, or as a cron with that IANA timezone for something that repeats. Ask only if what they said is truly ambiguous.',
   'Infer settings from how they describe the job ("only ping me if it breaks" means notifyMode when-needed). Write each job\'s prompt so it makes sense with no other context.',
-  "Creating, changing and deleting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
+  "Creating, changing, deleting, running, stopping and resetting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
 ].join("\n\n");

@@ -7,7 +7,7 @@ import { bootServer, faux, newToken, tempStore, until } from "./helpers.js";
 import type { Attention } from "../src/ask-user.js";
 import { CONFIRM_TIMEOUT_S, MANAGER_PROMPT } from "../src/manager.js";
 
-type Seen = { method: string; path: string; body: any; auth: string | undefined };
+type Seen = { method: string; path: string; body: any; auth: string | undefined; approval: string | undefined };
 
 /** A stand-in for the Scheduler's localhost API: records what it is asked, serves a few jobs and questions. */
 async function stubScheduler() {
@@ -25,7 +25,7 @@ async function stubScheduler() {
     for await (const c of req) chunks.push(c as Buffer);
     const raw = Buffer.concat(chunks).toString("utf8");
     const url = new URL(req.url ?? "/", "http://stub");
-    const record: Seen = { method: req.method ?? "", path: url.pathname + url.search, body: raw ? JSON.parse(raw) : undefined, auth: req.headers.authorization };
+    const record: Seen = { method: req.method ?? "", path: url.pathname + url.search, body: raw ? JSON.parse(raw) : undefined, auth: req.headers.authorization, approval: req.headers["x-approval"] as string | undefined };
     seen.push(record);
     const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (refuse) return send(409, { error: refuse });
@@ -65,7 +65,8 @@ async function setup() {
   const token = newToken();
   const scheduler = await stubScheduler();
   process.env.DURABLE_JIM_URL = scheduler.url;
-  process.env.DURABLE_JIM_TOKEN = "scheduler-secret";
+  process.env.DURABLE_JIM_MANAGER_TOKEN = "manager-secret";
+  process.env.DURABLE_JIM_TOKEN = "full-secret"; // the Manager must never use this one
   const server = await bootServer({ home: join(t.root, "home"), startDirs: t.work, token });
   const call = (path: string, init: RequestInit = {}) =>
     fetch(`${server.base}/v1${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } });
@@ -106,7 +107,7 @@ test("the Manager tools are an optional extension: listed, off by default, and a
     assert.equal((await m.enable()).status, 200);
     const after = await m.settle(await m.say("manage: list_jobs"));
     assert.match(after.answer!.text, /Daily Digest \[active\] cron "0 7 \* \* \*" \(America\/Chicago\) next 2026-10-30T12:00:00Z/);
-    assert.equal(m.scheduler.seen[0]!.auth, "Bearer scheduler-secret", "calls the Scheduler with its token");
+    assert.equal(m.scheduler.seen[0]!.auth, "Bearer manager-secret", "calls the Scheduler with the Manager's credential, never the full token");
   } finally {
     await m.close();
   }
@@ -130,7 +131,10 @@ test("create_job shows the preview as an Approve/Deny question and saves only on
     await m.answer(q.id, "Approve");
     const done = await m.settle(turn);
     assert.match(done.answer!.text, /Saved job "Call the bank"/);
-    assert.deepEqual(m.scheduler.seen.filter((r) => r.method === "POST" && r.path === "/jobs")[0]!.body, remind);
+    const saved = m.scheduler.seen.filter((r) => r.method === "POST" && r.path === "/jobs")[0]!;
+    assert.deepEqual(saved.body, remind);
+    assert.equal(saved.approval, q.id, "the approved question's id goes with the change");
+    assert.equal(m.scheduler.seen.find((r) => r.path === "/jobs?dryRun=true")!.approval, undefined, "a preview needs none");
   } finally {
     await m.close();
   }
@@ -177,18 +181,43 @@ test("update_job and delete_job also wait for approval; the job is found by name
   }
 });
 
-test("run, stop, reset, the run lists and the question list need no approval", async () => {
+test("run, stop and reset each wait for approval; the run lists and the question list need none", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    const approved = async (prompt: string) => {
+      const turn = await m.say(prompt);
+      await until(async () => (await m.pending()) !== undefined, 15000, "the confirmation");
+      const q = (await m.pending())!;
+      assert.deepEqual(m.scheduler.seen.filter((r) => r.method === "POST" && /\/(run|stop|reset)$/.test(r.path)).filter((r) => r.approval === q.id), [], "nothing happens before the answer");
+      await m.answer(q.id, "Approve");
+      return { text: (await m.settle(turn)).answer!.text, id: q.id };
+    };
+    const run = await approved('manage: run_job_now {"job":"Daily Digest"}');
+    assert.match(run.text, /Started a run of "Daily Digest" \(j1:1\)/);
+    assert.equal(m.scheduler.seen.find((r) => r.path.endsWith("/run"))!.approval, run.id);
+    assert.match((await approved('manage: stop_run {"job":"Daily Digest"}')).text, /Stopped the run of "Daily Digest" \(stopped\)/);
+    assert.match((await approved('manage: reset_job {"job":"Daily Digest"}')).text, /Reset "Daily Digest"/);
+
+    const out = async (prompt: string) => (await m.settle(await m.say(prompt))).answer!.text;
+    assert.match(await out("manage: list_runs"), /Daily Digest \[finished\] - ok \(j1:1\)/);
+    assert.match(await out('manage: show_run {"run":"j1:1"}'), /Answer: All good/);
+    assert.match(await out("manage: list_questions"), /s9\/q1: Deploy it\? \[Approve \/ Deny\]/);
+    assert.equal(await m.pending(), undefined, "the reads asked the user nothing");
+  } finally {
+    await m.close();
+  }
+});
+
+test("with the Manager on, bash, the file tools and everything but its job tools are blocked", async () => {
   const m = await setup();
   try {
     await m.enable();
     const out = async (prompt: string) => (await m.settle(await m.say(prompt))).answer!.text;
-    assert.match(await out('manage: run_job_now {"job":"Daily Digest"}'), /Started a run of "Daily Digest" \(j1:1\)/);
-    assert.match(await out('manage: stop_run {"job":"Daily Digest"}'), /Stopped the run of "Daily Digest" \(stopped\)/);
-    assert.match(await out('manage: reset_job {"job":"Daily Digest"}'), /Reset "Daily Digest"/);
-    assert.match(await out("manage: list_runs"), /Daily Digest \[finished\] - ok \(j1:1\)/);
-    assert.match(await out('manage: show_run {"run":"j1:1"}'), /Answer: All good/);
-    assert.match(await out("manage: list_questions"), /s9\/q1: Deploy it\? \[Approve \/ Deny\]/);
-    assert.equal(await m.pending(), undefined, "none of these asked the user anything");
+    assert.match(await out('manage: bash {"command":"cat ~/.durable-jim-agent/client.json"}'), /The Manager can only use its job tools; "bash" is not available/);
+    assert.match(await out('manage: read {"path":"/etc/hosts"}'), /"read" is not available/);
+    assert.match(await out('manage: subagent {"task":"hi"}'), /"subagent" is not available/);
+    assert.match(await out("manage: list_jobs"), /Daily Digest/, "its own tools still work");
   } finally {
     await m.close();
   }
@@ -206,7 +235,9 @@ test("answer_question shows the question and the answer and sends only once appr
     assert.deepEqual(m.scheduler.seen.filter((r) => r.path.endsWith("/answer")), []);
     await m.answer(q.id, "Approve");
     assert.match((await m.settle(turn)).answer!.text, /Answered "Deploy it\?" with "Approve"/);
-    assert.deepEqual(m.scheduler.seen.find((r) => r.path.endsWith("/answer"))!.body, { answer: "Approve" });
+    const sent = m.scheduler.seen.find((r) => r.path.endsWith("/answer"))!;
+    assert.deepEqual(sent.body, { answer: "Approve" });
+    assert.equal(sent.approval, q.id);
   } finally {
     await m.close();
   }
