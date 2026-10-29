@@ -911,18 +911,20 @@ export class Store {
     return format === "markdown" ? { format: "markdown", text: toMarkdown(items) } : { format: "json", items };
   }
 
-  async preview(row: SessionRow, agentId: number) {
+  private async mainEntries(row: SessionRow, agentId: number) {
     const h = this.opened.get(row.id)?.harness;
     const c = h ? await h.conversation(agentId as ConversationId, ctx) : undefined;
-    if (!c) return undefined;
-    return lastAssistantText(await this.activeEntries(c))?.slice(0, 200);
+    return c ? this.activeEntries(c) : undefined;
+  }
+
+  async preview(row: SessionRow, agentId: number) {
+    const entries = await this.mainEntries(row, agentId);
+    return entries && lastAssistantText(entries)?.slice(0, 200);
   }
 
   async failure(row: SessionRow, agentId: number) {
-    const h = this.opened.get(row.id)?.harness;
-    const c = h ? await h.conversation(agentId as ConversationId, ctx) : undefined;
-    if (!c) return undefined;
-    return lastFailure(await this.activeEntries(c));
+    const entries = await this.mainEntries(row, agentId);
+    return entries && lastFailure(entries);
   }
 
   async inbox(h: Harness, c: Conversation): Promise<InboxItem[]> {

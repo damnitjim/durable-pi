@@ -217,7 +217,10 @@ export function lastFailure(entries: readonly WireEntry[]): { error: string; las
   let lastAction: string | undefined;
   let last: WireAssistantMessage | undefined;
   for (const entry of entries) {
-    if (entry.kind === "pi.user") lastAction = undefined; // only the failing turn's own tool calls count
+    if (entry.kind === "pi.user") {
+      lastAction = undefined; // only the failing turn's own tool calls count
+      last = undefined; // a newer input means the error is not the latest word
+    }
     if (entry.kind !== "pi.assistant") continue;
     for (const message of (entry.model ?? []).filter(isAssistant)) {
       last = message;

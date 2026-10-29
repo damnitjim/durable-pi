@@ -25,5 +25,6 @@ test("lastFailure ignores tool calls from earlier turns and falls back to a gene
 
 test("lastFailure is undefined when the last turn succeeded, even after an earlier error", () => {
   assert.equal(lastFailure([user(1), assistant(2, [], "error", "boom"), user(3), assistant(4, [], "stop")]), undefined);
+  assert.equal(lastFailure([user(1), assistant(2, [], "error", "boom"), user(3)]), undefined, "a newer input is not yet answered");
   assert.equal(lastFailure([]), undefined);
 });
