@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
-import { askAndWait } from "./ask-user.js";
+import { askAndWait, NO_ANSWER } from "./ask-user.js";
 
 export const MANAGER_EXTENSION = "durable-jim-manager";
 
@@ -17,10 +17,10 @@ export interface SchedulerApi {
   request(method: string, path: string, body?: unknown): Promise<any>;
 }
 
-/** Where the Scheduler listens: `DJIM_SCHEDULER_URL` and `DJIM_SCHEDULER_TOKEN`, else the `client.json` it writes in its state directory. */
+/** Where the Scheduler listens: `DURABLE_JIM_URL` and `DURABLE_JIM_TOKEN` (as for its other clients), else the `client.json` it writes in its state directory. */
 export function schedulerFromEnvironment(env: NodeJS.ProcessEnv = process.env): SchedulerApi {
   const endpoint = () => {
-    if (env.DJIM_SCHEDULER_URL && env.DJIM_SCHEDULER_TOKEN) return { url: env.DJIM_SCHEDULER_URL, token: env.DJIM_SCHEDULER_TOKEN };
+    if (env.DURABLE_JIM_URL && env.DURABLE_JIM_TOKEN) return { url: env.DURABLE_JIM_URL, token: env.DURABLE_JIM_TOKEN };
     try {
       const file = JSON.parse(readFileSync(join(env.DURABLE_JIM_HOME ?? join(homedir(), ".durable-jim-agent"), "client.json"), "utf8"));
       if (typeof file.url === "string" && typeof file.token === "string") return { url: file.url, token: file.token };
@@ -41,7 +41,9 @@ export function schedulerFromEnvironment(env: NodeJS.ProcessEnv = process.env): 
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(30_000),
         });
-      } catch {
+      } catch (error) {
+        // A write that timed out may still have gone through: say so, so it is checked before it is tried again.
+        if (method !== "GET" && (error as { name?: string }).name === "TimeoutError") throw new Error("The Scheduler did not answer in time. The change may have gone through: check with list_jobs before trying again.");
         throw new Error(`Can't reach the Scheduler at ${url}. Is it running?`);
       }
       const text = await response.text();
@@ -134,18 +136,20 @@ const Settings = {
 };
 const byName = Type.Object({ job: Type.String({ description: "The job's name (or id)" }) });
 
+/** How long a confirmation waits before it counts as a no: the Manager's one session must not be held for the 12 hours an ordinary question may wait. */
+export const CONFIRM_TIMEOUT_S = 30 * 60;
 export const APPROVE = "Approve";
 export const DENY = "Deny";
 
 /** Show the user `body` and wait for their answer. True only for an explicit Approve; anything else is a no, with what they said. */
 async function confirm(title: string, body: string, api: ToolExecutionApi, context: Context): Promise<{ approved: boolean; said: string }> {
-  const result = await askAndWait({ question: `${title}\n\n${body}`, choices: [APPROVE, DENY] }, api, context);
+  const result = await askAndWait({ question: `${title}\n\n${body}`, choices: [APPROVE, DENY], timeout: CONFIRM_TIMEOUT_S }, api, context);
   const said = (result.output ?? []).map((part) => ("text" in part ? part.text : "")).join("").trim();
   return { approved: !result.isError && said.toLowerCase() === APPROVE.toLowerCase(), said };
 }
 
 const NOT_DONE = (what: string, said: string) =>
-  failure(`Not ${what}: ${said && !/^(deny|no answer: denied)$/i.test(said) ? `the user replied "${said}"` : "the user declined (or did not answer)"}. Ask what they would like changed.`);
+  failure(`Not ${what}: ${said && said.toLowerCase() !== DENY.toLowerCase() && said !== NO_ANSWER ? `the user replied "${said}"` : "the user declined (or did not answer)"}. Ask what they would like changed.`);
 
 /** Wrap a tool body so a Scheduler refusal comes back as the tool's error, in the Scheduler's own words. */
 function guarded<A>(run: (args: A, api: ToolExecutionApi, context: Context) => Promise<ToolExecutionResult>) {
@@ -304,8 +308,11 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       }),
       execute: guarded(async ({ question, answer }, api, context) => {
         const pending = (await scheduler.request("GET", "/questions?status=pending")) as Question[];
-        const found = pending.find((q) => q.id === question) ?? pending.filter((q) => q.id.startsWith(question) || q.questionId === question).at(0);
-        if (!found) return failure(`no pending question "${question}"`);
+        // The full id, then the Backend's id for it, then the start of either: the first kind of match that finds any decides, and it must be exactly one.
+        const hits = [pending.filter((q) => q.id === question), pending.filter((q) => q.questionId === question), pending.filter((q) => q.id.startsWith(question))].find((tier) => tier.length > 0) ?? [];
+        if (hits.length === 0) return failure(`no pending question "${question}"`);
+        if (hits.length > 1) return failure(`"${question}" matches more than one question (${hits.map((q) => q.id).join("; ")}); use the full id`);
+        const found = hits[0]!;
         const { approved, said } = await confirm("Send this answer?", `${found.question}${found.choices?.length ? `\nChoices: ${found.choices.join(" / ")}` : ""}\n\nAnswer: ${answer}`, api, context);
         if (!approved) return NOT_DONE("answered", said);
         await scheduler.request("POST", `/questions/${encodeURIComponent(found.id)}/answer`, { answer });
@@ -317,13 +324,14 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
   return defineExtension({
     name: MANAGER_EXTENSION,
     tools,
-    sections: [
-      section(
-        MANAGER_EXTENSION,
-        () =>
-          "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, run, stop and delete them with your tools. Be brief. Infer settings from how they describe the job (\"only ping me if it breaks\" means notifyMode when-needed). Write each job's prompt so it makes sense with no other context. Convert times to an ISO time with an offset, or a cron with an IANA timezone; ask for the timezone if you do not know it. Creating, changing and deleting a job, and answering a question, show the user the details and wait for their Approve; never assume it. Leave trusted false unless they say the job should run unattended.",
-        { tag: false },
-      ),
-    ],
+    sections: [section(MANAGER_EXTENSION, () => MANAGER_PROMPT, { tag: false })],
   });
 }
+
+/** The Manager's standing instructions. Constant on purpose: a prompt section must render the same every time. */
+export const MANAGER_PROMPT = [
+  "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, run, stop and delete them with your tools. Be brief.",
+  'Each message starts with a line in square brackets giving the time it was sent and the user\'s timezone. Turn times like "at 5" into the next such moment in that timezone, written as an ISO time with its offset, or as a cron with that IANA timezone for something that repeats. Ask only if what they said is truly ambiguous.',
+  'Infer settings from how they describe the job ("only ping me if it breaks" means notifyMode when-needed). Write each job\'s prompt so it makes sense with no other context.',
+  "Creating, changing and deleting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
+].join("\n\n");

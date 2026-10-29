@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { bootServer, faux, newToken, tempStore, until } from "./helpers.js";
 import type { Attention } from "../src/ask-user.js";
+import { CONFIRM_TIMEOUT_S, MANAGER_PROMPT } from "../src/manager.js";
 
 type Seen = { method: string; path: string; body: any; auth: string | undefined };
 
@@ -14,7 +15,10 @@ async function stubScheduler() {
   const jobs: any[] = [
     { id: "j1", name: "Daily Digest", prompt: "Summarise", schedule: { kind: "cron", expr: "0 7 * * *", timezone: "America/Chicago" }, status: "active", nextFireAt: Date.parse("2026-10-30T12:00:00Z"), sessionPolicy: "fresh", model: null, workspace: null, notifyMode: "always", trusted: false, catchUpWindowMs: 7_200_000 },
   ];
-  const questions = [{ id: "s9/q1", questionId: "q1", jobId: "j1", question: "Deploy it?", choices: ["Approve", "Deny"], askedAt: 1, timeoutAt: 2 }];
+  const questions = [
+    { id: "s9/q1", questionId: "q1", jobId: "j1", question: "Deploy it?", choices: ["Approve", "Deny"], askedAt: 1, timeoutAt: 2 },
+    { id: "s9/q10", questionId: "q10", jobId: "j1", question: "Delete the branch?", choices: ["Yes", "No"], askedAt: 1, timeoutAt: 2 },
+  ];
   let refuse: string | undefined;
   const server: Server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -60,8 +64,8 @@ async function setup() {
   const t = await tempStore();
   const token = newToken();
   const scheduler = await stubScheduler();
-  process.env.DJIM_SCHEDULER_URL = scheduler.url;
-  process.env.DJIM_SCHEDULER_TOKEN = "scheduler-secret";
+  process.env.DURABLE_JIM_URL = scheduler.url;
+  process.env.DURABLE_JIM_TOKEN = "scheduler-secret";
   const server = await bootServer({ home: join(t.root, "home"), startDirs: t.work, token });
   const call = (path: string, init: RequestInit = {}) =>
     fetch(`${server.base}/v1${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } });
@@ -208,6 +212,18 @@ test("answer_question shows the question and the answer and sends only once appr
   }
 });
 
+test("answer_question refuses an ambiguous start of an id instead of picking one", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    const out = async (prompt: string) => (await m.settle(await m.say(prompt))).answer!.text;
+    assert.match(await out('manage: answer_question {"question":"s9/q","answer":"Approve"}'), /matches more than one question \(s9\/q1; s9\/q10\)/);
+    assert.match(await out('manage: answer_question {"question":"zzz","answer":"Approve"}'), /no pending question "zzz"/);
+  } finally {
+    await m.close();
+  }
+});
+
 test("the Scheduler's refusals and an unknown job come back as the tool's error, in its own words", async () => {
   const m = await setup();
   try {
@@ -227,6 +243,26 @@ test("when the Scheduler is not reachable the tool says so", async () => {
     await m.enable();
     await m.scheduler.close();
     assert.match((await m.settle(await m.say("manage: list_jobs"))).answer!.text, /Can't reach the Scheduler/);
+  } finally {
+    await m.close();
+  }
+});
+
+test("the Manager's instructions are constant text and say where the time comes from", () => {
+  assert.match(MANAGER_PROMPT, /Each message starts with a line in square brackets giving the time/);
+  assert.match(MANAGER_PROMPT, /ISO time with its offset/);
+  assert.doesNotMatch(MANAGER_PROMPT, /\b20\d\d-\d\d-\d\d\b/, "no date baked in: a prompt section must render the same every time");
+});
+
+test("a confirmation times out as a no after half an hour, not the 12 hours of an ordinary question", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    await m.say(`manage: create_job ${JSON.stringify(remind)}`);
+    await until(async () => (await m.pending()) !== undefined, 15000, "the question");
+    const q = (await m.pending())!;
+    assert.equal(q.timeoutAt - q.askedAt, CONFIRM_TIMEOUT_S * 1000);
+    await m.answer(q.id, "Deny");
   } finally {
     await m.close();
   }
