@@ -41,6 +41,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { curatedModels, defaultModelId } from "./model-catalog.js";
 import { fauxModels, installFaux } from "./faux.js";
+import { ATTENTION_DOC, AttentionDoc, createAskUser } from "./ask-user.js";
 import {
   Harness,
   createRegistry,
@@ -97,7 +98,7 @@ export interface StoreOptions {
 /** Agent documents a client may read or stream, by kind. */
 /** apps/dpi-backend/src → the checkout root. */
 const CODE_DIR = resolve(import.meta.dirname, "../../..");
-const AGENT_DOCS = { [JOB_RUNS_DOC]: JobRuns, "demo.workspace": Workspace } as const;
+const AGENT_DOCS = { [JOB_RUNS_DOC]: JobRuns, "demo.workspace": Workspace, [ATTENTION_DOC]: AttentionDoc } as const;
 export const AGENT_DOC_KINDS = Object.keys(AGENT_DOCS);
 export const DEVICE_DOC_KINDS = ["app.shared-state"];
 
@@ -512,6 +513,8 @@ export class Store {
       registry.install(playground);
       const skills = createSkills();
       registry.install(skills);
+      const askUser = createAskUser();
+      registry.install(askUser);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
       const addons = createAddons({ offline: this.options.provider === "faux" });
       for (const extension of addons.list) registry.install(extension);
@@ -526,7 +529,7 @@ export class Store {
             await tx.doc(JobRuns, c.id);
           },
           settings: {
-            extensions: [CodingTools, playground, skills],
+            extensions: [CodingTools, playground, skills, askUser],
             // Read at every use, so a PATCH .../compaction applies from the next request.
             get compaction() {
               return compaction();
