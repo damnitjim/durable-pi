@@ -185,7 +185,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
       JSON.stringify((await store.entries(c, undefined, 500)).items.filter((e) => e.kind === "pi.system").slice(0, 1));
 
     let ext = await store.extensionsOf(row, c);
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false], ["durable-jim-manager", false]]);
     assert.deepEqual(ext.builtIn.sort(), ["ask-user", "coding-tools", "guard", "playground", "skills"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
@@ -212,7 +212,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     assert.doesNotMatch(await systemText(), /Clear, Concise, Actionable Communication/);
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true], ["durable-jim-manager", false]]);
     assert.deepEqual(ext.builtIn, ["coding-tools", "playground", "skills", "ask-user", "guard"]);
     await mkdir(join(t.work, "doomed"));
     await turn("!rm -rf doomed");
