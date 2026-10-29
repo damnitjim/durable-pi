@@ -70,11 +70,11 @@ function inside(workspace: string, path: string): boolean {
 }
 
 /** Whether `raw` (as written in a call run from `cwd`) lands inside the workspace. Anything unclear counts as outside. */
-function withinWorkspace(cwd: string, raw: string, home: string): boolean {
+function withinWorkspace(workspace: string, raw: string, home: string, from = workspace): boolean {
   const expanded = expandPath(raw, home);
   if (expanded === undefined) return false;
   try {
-    return inside(realpathSync(cwd), realish(resolve(cwd, expanded)));
+    return inside(realpathSync(workspace), realish(resolve(from, expanded)));
   } catch {
     return false;
   }
@@ -83,7 +83,8 @@ function withinWorkspace(cwd: string, raw: string, home: string): boolean {
 // ------------------------------------------------------------------ the built-in risk list
 
 const SHELL_SPLIT = /&&|\|\||[;|&\n()`]|\$\(/;
-const WRAPPERS = new Set(["env", "command", "nohup", "time", "exec", "nice", "builtin"]);
+const WRAPPERS = new Set(["env", "command", "nohup", "time", "exec", "nice", "builtin", "timeout", "xargs"]);
+const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 const unquote = (token: string) => token.replace(/^["']|["']$/g, "");
 
 type Segment = { word: string; args: string[]; text: string };
@@ -95,7 +96,15 @@ function segments(command: string): Segment[] {
     .filter(Boolean)
     .map((text) => {
       const tokens = text.split(/\s+/).map(unquote);
-      while (tokens.length && (/^\w+=/.test(tokens[0]) || WRAPPERS.has(tokens[0]))) tokens.shift();
+      // Drop wrappers with their flags and numeric arguments (`nice -n 5`, `timeout 5`), and a leading backslash.
+      for (;;) {
+        tokens[0] = tokens[0]?.replace(/^\\/, "");
+        if (tokens.length && /^\w+=/.test(tokens[0])) tokens.shift();
+        else if (tokens.length && WRAPPERS.has(tokens[0])) {
+          tokens.shift();
+          while (tokens.length && (tokens[0].startsWith("-") || /^\d+[smhd]?$/.test(tokens[0]))) tokens.shift();
+        } else break;
+      }
       return { word: basename(tokens[0] ?? ""), args: tokens.slice(1), text };
     });
 }
@@ -114,7 +123,7 @@ const INSTALLERS: Record<string, string[]> = {
   pip: ["install"],
   pip3: ["install"],
   pipx: ["install"],
-  uv: ["add", "sync"],
+  uv: ["add", "sync", "install"],
   brew: ["install", "reinstall", "upgrade"],
   gem: ["install"],
   cargo: ["install"],
@@ -129,8 +138,31 @@ const WRITERS = new Set(["tee", "cp", "mv", "ln", "install", "touch", "sed", "pe
 const DELETERS = new Set(["rm", "rmdir", "unlink", "shred"]);
 
 /** Why a command needs approval, or undefined if it doesn't. */
-export function defaultRisk(command: string, cwd: string, home: string): string | undefined {
+export function defaultRisk(command: string, startCwd: string, home: string): string | undefined {
+  let cwd = startCwd;
   for (const { word, args, text } of segments(command)) {
+    // `bash -c "…"`, `eval …` and `find -exec …` run more commands; read them as if they were written here.
+    if (SHELLS.has(word) && args.includes("-c")) {
+      const inner = defaultRisk(args.slice(args.indexOf("-c") + 1).join(" "), cwd, home);
+      if (inner) return inner;
+    }
+    if (word === "eval") {
+      const inner = defaultRisk(args.join(" "), cwd, home);
+      if (inner) return inner;
+    }
+    if (word === "find" && args.some((a) => a === "-exec" || a === "-execdir" || a === "-delete")) {
+      const at = args.findIndex((a) => a === "-exec" || a === "-execdir");
+      const inner = at >= 0 ? defaultRisk(args.slice(at + 1).join(" "), cwd, home) : undefined;
+      if (inner) return inner;
+      if (args.includes("-delete") && !withinWorkspace(startCwd, args.find((a) => !a.startsWith("-")) ?? ".", home, cwd))
+        return "deletes outside the workspace";
+    }
+    // Later segments of `cd X && …` run from X.
+    if (word === "cd" && args[0]) {
+      const target = expandPath(args[0], home);
+      cwd = target === undefined ? "/" : resolve(cwd, target);
+      continue;
+    }
     if (word === "sudo" || word === "doas" || word === "su") return "runs as another user (sudo)";
     if (word === "launchctl") return "changes launchd services (launchctl)";
     if (word === "osascript") return "scripts other apps (osascript)";
@@ -139,7 +171,7 @@ export function defaultRisk(command: string, cwd: string, home: string): string 
       if (word === "rm" && (hasLong(args, "--recursive") || hasShort(args, "rR")) && (hasLong(args, "--force") || hasShort(args, "f")))
         return "force-deletes recursively (rm -rf)";
       const targets = args.filter((a) => !a.startsWith("-"));
-      if (targets.some((t) => !withinWorkspace(cwd, t, home))) return "deletes outside the workspace";
+      if (targets.some((t) => !withinWorkspace(startCwd, t, home, cwd))) return "deletes outside the workspace";
     }
 
     if (word === "git") {
@@ -162,15 +194,16 @@ export function defaultRisk(command: string, cwd: string, home: string): string 
     const verbs = INSTALLERS[manager];
     if (verbs) {
       const rest = word.startsWith("python") ? args.slice(2) : args;
-      const sub = rest.find((a) => !a.startsWith("-"));
-      if (sub && verbs.includes(sub)) return `installs packages (${manager} ${sub})`;
+      // Not just the first word: `npm --prefix app install`, `uv pip install`.
+      const sub = rest.find((a) => verbs.includes(a));
+      if (sub) return `installs packages (${manager} ${sub})`;
     }
 
     if (word === "curl") {
       const upload =
         hasLong(args, "--data", "--data-binary", "--data-raw", "--data-urlencode", "--data-ascii", "--form", "--json", "--upload-file") ||
         hasShort(args, "dFT") ||
-        args.some((a, i) => (a === "-X" || a === "--request" ? !/^GET|HEAD$/i.test(args[i + 1] ?? "") : /^-X./.test(a) && !/^-X(GET|HEAD)$/i.test(a)));
+        args.some((a, i) => (a === "-X" || a === "--request" ? !/^(GET|HEAD)$/i.test(args[i + 1] ?? "") : /^-X./.test(a) && !/^-X(GET|HEAD)$/i.test(a)));
       if (upload) return "uploads data (curl)";
     }
     if (word === "wget" && hasLong(args, "--post-data", "--post-file", "--body-data", "--body-file", "--method")) {
@@ -185,8 +218,8 @@ export function defaultRisk(command: string, cwd: string, home: string): string 
       for (const raw of candidates) {
         const expanded = expandPath(raw, home);
         if (expanded === undefined) continue;
-        const rel = relative(home, resolve(cwd, expanded));
-        if (!rel.startsWith("..") && !isAbsolute(rel) && rel.split("/")[0].startsWith(".") && rel !== "")
+        const target = resolve(cwd, expanded);
+        if (target !== home && inside(home, target) && relative(home, target).split("/")[0].startsWith("."))
           return "writes a dotfile in the home folder";
       }
     }

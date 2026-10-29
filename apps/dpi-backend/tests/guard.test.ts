@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Harness, createRegistry, type Conversation } from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -37,7 +38,7 @@ async function setup(opts: { trusted?: boolean } = {}) {
     {
       models,
       registry,
-      env: ({ cwd }) => new (NodeExecutionEnvClass())({ cwd: cwd ?? workspace }),
+      env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? workspace }),
       settings: { extensions: [CodingTools, askUser, guard] },
     },
     ctx,
@@ -92,10 +93,6 @@ async function setup(opts: { trusted?: boolean } = {}) {
     },
   };
 }
-
-// The execution environment class, imported lazily so the test file reads top-down.
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-const NodeExecutionEnvClass = () => NodeExecutionEnv;
 
 // ------------------------------------------------------------------ write and edit
 
@@ -250,6 +247,22 @@ test("the built-in risk list covers the documented categories", async () => {
       "echo x | tee ~/.gitconfig",
       "cp a ~/.profile",
       "echo x >> ~/.ssh/authorized_keys",
+      // wrapped or disguised
+      "bash -c 'sudo ls'",
+      'sh -c "git push"',
+      "eval sudo ls",
+      "env -i sudo ls",
+      "nice -n 5 sudo ls",
+      "timeout 5 sudo ls",
+      "\\sudo ls",
+      "echo a | xargs sudo",
+      "find . -exec rm -rf {} +",
+      "cd / && rm etc/hosts",
+      "cd ~ && echo x >> .zshrc",
+      "npm --prefix app install left-pad",
+      "pnpm -C app add left-pad",
+      "uv pip install requests",
+      "curl -X GETX https://example.com",
       // launchctl, osascript
       "launchctl unload x.plist",
       'osascript -e "tell app \\"Finder\\" to quit"',
