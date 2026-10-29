@@ -17,7 +17,7 @@ export const faux = { provider: "faux", modelId: "echo" };
 export async function tempStore() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "dpi-be-")));
   await mkdir(join(root, "work", "project", "nested"), { recursive: true });
-  const options = { dataDir: join(root, "data"), startDirs: [join(root, "work")], name: "test", provider: "faux" as const };
+  const options = { dataDir: join(root, "data"), startDirs: [join(root, "work")], name: "test", provider: "faux" as const, guardFile: join(root, "guard.json") };
   return {
     root,
     work: join(root, "work"),

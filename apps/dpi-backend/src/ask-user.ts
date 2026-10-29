@@ -6,8 +6,8 @@
 // sends the reminder after an hour and answers "No answer: denied" at the timeout. The tool call watches the document
 // for an answer with cheap reads, so a waiting question writes nothing. All of it survives a restart.
 import { Type } from "@earendil-works/pi-ai";
-import { defineDoc, defineExtension, defineTask, defineTool, section, type Conversation, type Harness } from "@earendil-works/pi-durable";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { defineDoc, defineExtension, defineTask, defineTool, section, type Conversation, type Harness, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { ApiFault, invalid, notFound } from "./errors.js";
 
 const HOUR_MS = 3_600_000;
@@ -44,6 +44,8 @@ export type Attention = {
   notices: Notice[];
   /** Set by the Scheduler before it starts a run, to just before the job's next fire; no question waits past it. */
   answerBy?: number;
+  /** Set by the Scheduler for a trusted job: the guard skips its approval step (never its workspace limit). */
+  trusted?: boolean;
 };
 
 export const ATTENTION_DOC = "jim.attention";
@@ -134,6 +136,56 @@ export async function answerQuestion(h: Harness, c: Conversation, id: string, an
   return { ok: true as const, question };
 }
 
+/** Asks the question and waits, durably, for its answer. Also how the guard asks for approval. Replay finds the question this call already asked. */
+export async function askAndWait(
+  args: { question: string; choices?: string[]; timeout?: number },
+  api: ToolExecutionApi,
+  context: Context,
+): Promise<ToolExecutionResult> {
+  if (args.timeout !== undefined && !(args.timeout > 0)) throw Error("timeout must be a positive number of seconds");
+  const timeoutMs = args.timeout !== undefined ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS;
+  // A replay after a crash finds the question this call asked instead of asking again.
+  const asked = await api.commit(async (tx) => {
+    const doc = await tx.doc(AttentionDoc, api.conversationId);
+    const found = Object.values(doc.questions).find((q) => q.callId === api.callId);
+    if (found) return plain(found);
+    doc.seq += 1;
+    const id = `q${doc.seq}`;
+    const askedAt = api.now();
+    const taskId = await tx.createTask(
+      WaitTask,
+      { id },
+      { ownership: { kind: "task", taskId: api.taskId }, background: false },
+    );
+    const created: Question = {
+      id,
+      callId: api.callId,
+      taskId: taskId as number,
+      question: args.question,
+      ...(args.choices?.length ? { choices: args.choices } : {}),
+      askedAt,
+      timeoutAt: askedAt + timeoutMs,
+      status: "pending",
+    };
+    doc.questions[id] = created;
+    return plain(created);
+  }, context);
+  await api.details({ questionId: asked.id }, context);
+  // The question's task sleeps to its deadlines. This call sees the answer, from the user or the timeout, as it lands.
+  const read = async () => (await api.snapshot(AttentionDoc, api.conversationId, context))?.questions[asked.id];
+  let current = await read();
+  while (current?.status === "pending") {
+    await pause(WATCH_MS);
+    current = await read();
+  }
+  if (current?.status === "cancelled")
+    return { output: [{ type: "text", text: "The question was cancelled before anyone answered." }], isError: true };
+  return {
+    output: [{ type: "text", text: current?.answer ?? NO_ANSWER }],
+    details: { questionId: asked.id, answeredBy: current?.answeredBy ?? "timeout" },
+  };
+}
+
 export function createAskUser() {
   const ask = defineTool({
     name: "ask_user",
@@ -145,50 +197,7 @@ export function createAskUser() {
       timeout: Type.Optional(Type.Number({ description: "Seconds to wait before treating it as denied." })),
     }),
     replay: "safe",
-    execute: async (args, api, context) => {
-      if (args.timeout !== undefined && !(args.timeout > 0)) throw Error("timeout must be a positive number of seconds");
-      const timeoutMs = args.timeout !== undefined ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS;
-      // A replay after a crash finds the question this call asked instead of asking again.
-      const asked = await api.commit(async (tx) => {
-        const doc = await tx.doc(AttentionDoc, api.conversationId);
-        const found = Object.values(doc.questions).find((q) => q.callId === api.callId);
-        if (found) return plain(found);
-        doc.seq += 1;
-        const id = `q${doc.seq}`;
-        const askedAt = api.now();
-        const taskId = await tx.createTask(
-          WaitTask,
-          { id },
-          { ownership: { kind: "task", taskId: api.taskId }, background: false },
-        );
-        const created: Question = {
-          id,
-          callId: api.callId,
-          taskId: taskId as number,
-          question: args.question,
-          ...(args.choices?.length ? { choices: args.choices } : {}),
-          askedAt,
-          timeoutAt: askedAt + timeoutMs,
-          status: "pending",
-        };
-        doc.questions[id] = created;
-        return plain(created);
-      }, context);
-      await api.details({ questionId: asked.id }, context);
-      // The question's task sleeps to its deadlines. This call sees the answer, from the user or the timeout, as it lands.
-      const read = async () => (await api.snapshot(AttentionDoc, api.conversationId, context))?.questions[asked.id];
-      let current = await read();
-      while (current?.status === "pending") {
-        await pause(WATCH_MS);
-        current = await read();
-      }
-      if (current?.status === "cancelled")
-        return { output: [{ type: "text", text: "The question was cancelled before anyone answered." }], isError: true };
-      return {
-        output: [{ type: "text", text: current?.answer ?? NO_ANSWER }],
-        details: { questionId: asked.id, answeredBy: current?.answeredBy ?? "timeout" },
-      };
-    },
+    execute: (args, api, context) => askAndWait(args, api, context),
   });
   const notify = defineTool({
     name: "notify",

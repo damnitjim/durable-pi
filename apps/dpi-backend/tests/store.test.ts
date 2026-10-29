@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import type { Store } from "../src/store.js";
 import { JOB_RUNS_DOC, type JobRunsDoc } from "../../dpi-sdk/src/jobs.js";
@@ -172,6 +172,8 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
   const store = await t.open();
   try {
     await mkdir(join(t.work, "doomed"));
+    // The guard would ask before `rm -rf`; the guard file is how this test says it is fine.
+    await writeFile(t.options.guardFile, JSON.stringify({ allow: ["^rm -rf doomed$"] }));
     const session = await store.create({ name: "Ext", cwd: t.work, model: faux });
     const { row, h, c } = await store.resolveAgent(session.id, "main");
     let n = 0;
@@ -184,7 +186,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
 
     let ext = await store.extensionsOf(row, c);
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false]]);
-    assert.deepEqual(ext.builtIn.sort(), ["ask-user", "coding-tools", "playground", "skills"]);
+    assert.deepEqual(ext.builtIn.sort(), ["ask-user", "coding-tools", "guard", "playground", "skills"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
     // jev-damage-control (offline rules under the faux provider) blocks the delete; turned off, it runs.
@@ -211,7 +213,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true]]);
-    assert.deepEqual(ext.builtIn, ["coding-tools", "playground", "skills", "ask-user"]);
+    assert.deepEqual(ext.builtIn, ["coding-tools", "playground", "skills", "ask-user", "guard"]);
     await mkdir(join(t.work, "doomed"));
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
