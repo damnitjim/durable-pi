@@ -13,7 +13,7 @@ export interface BackendConfig {
   envFile: string;
   dataDir: string;
   startDirs: string[];
-  provider: "openrouter" | "faux";
+  provider: "pi" | "faux";
   token: string;
 }
 
@@ -41,7 +41,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
       .split(":")
       .filter(Boolean)
       .map((p) => resolve(expand(p))),
-    provider: (env.DPI_PROVIDER ?? "openrouter") === "faux" ? "faux" : "openrouter",
+    provider: env.DPI_PROVIDER === "faux" ? "faux" : "pi",
     token: env.DPI_TOKEN ?? "",
   };
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)

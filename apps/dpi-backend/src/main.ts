@@ -4,16 +4,24 @@ import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
+import { loadPiModels } from "./pi-models.js";
 import { bearerAuth } from "./auth.js";
 import { errorMiddleware } from "./errors.js";
 import { v1 } from "./routes.js";
 
 const config = loadConfig();
+const exitWith = (error: unknown): never => {
+  console.error(`dpi-backend cannot start: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+};
+// pi's credentials and default model; throws a plain message (OAuth-only login, no default model…) rather than starting.
+const pi = config.provider === "pi" ? await loadPiModels().catch(exitWith) : undefined;
 const store = await Store.open({
   dataDir: config.dataDir,
   startDirs: config.startDirs,
   name: config.name,
   provider: config.provider,
+  pi,
 });
 
 const app = express();
