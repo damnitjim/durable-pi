@@ -28,7 +28,7 @@ import {
   THINKING_LEVELS,
   type CompactionSettings,
 } from "../../dpi-sdk/src/api.js";
-import { lastAssistantText, messageText, toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
+import { lastAssistantText, lastFailure, messageText, toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
 import { ApiFault, invalid, notFound } from "./errors.js";
 import { DatabaseSync } from "node:sqlite";
 import { mkdir, readdir, realpath, rename as renamePath, stat } from "node:fs/promises";
@@ -911,11 +911,20 @@ export class Store {
     return format === "markdown" ? { format: "markdown", text: toMarkdown(items) } : { format: "json", items };
   }
 
-  async preview(row: SessionRow, agentId: number) {
+  private async mainEntries(row: SessionRow, agentId: number) {
     const h = this.opened.get(row.id)?.harness;
     const c = h ? await h.conversation(agentId as ConversationId, ctx) : undefined;
-    if (!c) return undefined;
-    return lastAssistantText(await this.activeEntries(c))?.slice(0, 200);
+    return c ? this.activeEntries(c) : undefined;
+  }
+
+  async preview(row: SessionRow, agentId: number) {
+    const entries = await this.mainEntries(row, agentId);
+    return entries && lastAssistantText(entries)?.slice(0, 200);
+  }
+
+  async failure(row: SessionRow, agentId: number) {
+    const entries = await this.mainEntries(row, agentId);
+    return entries && lastFailure(entries);
   }
 
   async inbox(h: Harness, c: Conversation): Promise<InboxItem[]> {

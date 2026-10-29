@@ -141,7 +141,10 @@ export function deviceStream(store: Store, req: Request, res: Response) {
       for (const item of items)
         if (item.type === "agent.finished") {
           const row = store.list().find((r) => r.id === item.sessionId);
-          if (row) item.preview = await store.preview(row, item.agentId).catch(() => undefined);
+          if (row) {
+            item.preview = await store.preview(row, item.agentId).catch(() => undefined);
+            item.failure = await store.failure(row, item.agentId).catch(() => undefined);
+          }
         }
       sse.send({ type: "activity", items });
     }

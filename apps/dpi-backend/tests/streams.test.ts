@@ -118,6 +118,34 @@ test("agent, session and device streams carry snapshots and deltas that reduce t
   }
 });
 
+test("a turn that ends in an error reports its failure on the device stream's agent.finished", async () => {
+  const t = await tempStore();
+  const token = newToken();
+  const server = await bootServer({ home: join(t.root, "home"), startDirs: t.work, token });
+  const stop = new AbortController();
+  try {
+    const client = new DpiClient(server.base, token);
+    const session = await client.createSession({ name: "Fails", cwd: t.work, model: faux });
+    const main = client.agent(session.id, "main");
+    const frames: Frame[] = [];
+    void collect(client.deviceEvents(stop.signal), frames);
+    const finished = () => frames.flatMap((f) => (f.type === "activity" ? f.items : [])).filter((a) => a.type === "agent.finished");
+    await until(async () => frames.some((f) => f.type === "tree"), 5000, "device tree");
+
+    await main.send("!sleep 1", "followUp", "ok-1");
+    await until(async () => finished().length === 1, 15000, "first finish");
+    assert.equal(finished()[0].failure, undefined, "a good turn carries no failure");
+
+    await main.send("fail: rate limited", "followUp", "bad-1");
+    await until(async () => finished().length === 2, 60000, "second finish (Pi retries the error before giving up)");
+    assert.deepEqual(finished()[1].failure, { error: "rate limited" }, "no tool call in the failing turn, so no lastAction");
+  } finally {
+    stop.abort();
+    await server.stop();
+    await t.cleanup();
+  }
+});
+
 test("openSse ends a slow viewer instead of buffering without bound", () => {
   const writes: string[] = [];
   let ended = false;

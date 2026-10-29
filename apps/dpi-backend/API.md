@@ -77,7 +77,7 @@ data: {"type":"batch","events":[{"type":"message_update", ...}]}
 
 | Scope | Frames |
 |---|---|
-| device `/v1/events` | `tree {tree}` (deduped, coalesced 250ms), `activity {items:[{type:"agent.started"\|"agent.finished", sessionId, agentId, at, preview?}]}`, `doc {kind, value, revision}` |
+| device `/v1/events` | `tree {tree}` (deduped, coalesced 250ms), `activity {items:[{type:"agent.started"\|"agent.finished", sessionId, agentId, at, preview?, failure?: {error, lastAction?}}]}` (`failure` is set on an `agent.finished` whose turn ended in an error, after Pi's retries), `doc {kind, value, revision}` |
 | session `/v1/sessions/:s/events` | `session {agents, tasks, usage}`, then `agents`, `tasks`, `usage` |
 | agent `.../agents/:a/events` | `snapshot {snapshot, inbox}`, `batch {events}` (pi-durable `watchEvents()` verbatim), `inbox {items}` (queued content), `doc {kind, value}` |
 | all | `hello {apiVersion, scope, serverTime}` |

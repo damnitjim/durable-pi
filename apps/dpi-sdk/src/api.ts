@@ -468,6 +468,8 @@ export interface Activity {
   agentId: number;
   at: number;
   preview?: string;
+  /** On `agent.finished`: set when the turn ended in an error. */
+  failure?: { error: string; lastAction?: string };
 }
 
 export interface UsageTotals {
