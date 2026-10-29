@@ -9,6 +9,7 @@
 //   "page: <summary>" → one ping_on_call_engineer call
 //   "ask: <question>[ | <choice>…][ | timeout=<seconds>]" → one ask_user call
 //   "notify: <message>" → one notify call
+//   "write: <path>"  → one write call;  "edit: <path>" → one edit call (hello → bye)
 //   "Release check: …" (the release-check job's subagent) → one bash call
 //   anything else  → "Echo: <text>"
 import type { MutableModels } from "@earendil-works/pi-ai/models";
@@ -80,6 +81,9 @@ export function installFaux(models: MutableModels) {
         ...(timeout ? { timeout: Number(timeout.split("=")[1]) } : {}),
       });
     }
+    if (prompt.startsWith("write:")) return call("write", { path: prompt.slice(6).trim(), content: "written by the agent\n" });
+    if (prompt.startsWith("edit:"))
+      return call("edit", { path: prompt.slice(5).trim(), edits: [{ oldText: "hello", newText: "bye" }] });
     if (prompt.startsWith("notify:")) return call("notify", { message: prompt.slice(7).trim() });
     if (prompt.startsWith("page:")) return call("ping_on_call_engineer", { summary: prompt.slice(5).trim() });
     if (prompt.startsWith("Release check:"))
