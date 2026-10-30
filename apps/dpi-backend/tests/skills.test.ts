@@ -21,13 +21,13 @@ const textOf = (m?: Msg) =>
       : "";
 
 /** A real pi-durable harness on temporary SQLite with the skills extension; only the model is scripted. */
-async function rig() {
+async function rig(opts: { home?: string; git?: boolean; cacheMs?: number; now?: () => number } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "dpi-skills-")));
-  const home = join(root, "home");
+  const home = opts.home ?? join(root, "home");
   const repo = join(root, "repo");
   const work = join(repo, "packages", "app");
   await mkdir(home, { recursive: true });
-  await mkdir(join(repo, ".git"), { recursive: true });
+  if (opts.git !== false) await mkdir(join(repo, ".git"), { recursive: true });
   await mkdir(work, { recursive: true });
   const warnings: string[] = [];
   const models = createModels();
@@ -45,21 +45,26 @@ async function rig() {
     return fauxAssistantMessage(fauxText("ok"));
   };
   handle.setResponses([reply]);
-  const registry = createRegistry();
-  registry.install(CodingTools);
-  const skills = createSkills({ home, warn: (m) => warnings.push(m) });
-  registry.install(skills);
-  const harness = await Harness.open(
-    await openNodeSqliteStorage(join(root, "s.sqlite")),
-    {
-      models,
-      registry,
-      env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? work }),
-      settings: { extensions: [CodingTools, skills] },
-    },
-    ctx,
-  );
-  const conversation = await harness.root(ctx, { agent: { cwd: work, model: { provider: "faux", modelId: "m" } } });
+  /** Open the harness on the same database, as the Backend does when a session is opened again. */
+  const open = async () => {
+    const registry = createRegistry();
+    registry.install(CodingTools);
+    // No cache unless a test asks for one: most tests change the folders between prompts.
+    const skills = createSkills({ home, warn: (m) => warnings.push(m), cacheMs: opts.cacheMs ?? 0, ...(opts.now ? { now: opts.now } : {}) });
+    registry.install(skills);
+    return Harness.open(
+      await openNodeSqliteStorage(join(root, "s.sqlite")),
+      {
+        models,
+        registry,
+        env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? work }),
+        settings: { extensions: [CodingTools, skills] },
+      },
+      ctx,
+    );
+  };
+  let harness = await open();
+  let conversation = await harness.root(ctx, { agent: { cwd: work, model: { provider: "faux", modelId: "m" } } });
   return {
     root,
     home,
@@ -83,6 +88,12 @@ async function rig() {
         user: textOf([...messages].reverse().find((m) => m.role === "user")),
         requests,
       };
+    },
+    /** Close the harness and open it again on the same database. */
+    async reopen() {
+      await harness.close(ctx);
+      harness = await open();
+      conversation = await harness.root(ctx);
     },
     async cleanup() {
       await harness.close(ctx);
@@ -249,4 +260,85 @@ test("frontmatter is real YAML: multi-line flow lists, block scalars with chompi
   assert.equal(data["disable-model-invocation"], true);
   assert.equal(body, "# Body");
   assert.throws(() => parseFrontmatter("---\nname: [unclosed\n---\n"));
+});
+
+test("a workspace without .git is walked up to the filesystem root, and the walk ends there", async () => {
+  const t = await rig({ git: false });
+  try {
+    await t.put(join(t.work, ".agents/skills/near/SKILL.md"), skillMd("near", "Next to the work."));
+    await t.put(join(t.root, ".agents/skills/above/SKILL.md"), skillMd("above", "Above where a repo root would be."));
+    const { system } = await t.ask("hi");
+    assert.ok(system.includes("Next to the work."));
+    assert.ok(system.includes("Above where a repo root would be."), "with no .git nothing stops the walk at the repo");
+    assert.deepEqual(t.warnings, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("after the harness is closed and opened again, the conversation still gets its skills and /skill: still works", async () => {
+  const t = await rig();
+  try {
+    await t.put(join(t.home, ".agents/skills/greet/SKILL.md"), skillMd("greet", "Greets.", "Say HELLO-AGAIN."));
+    assert.ok((await t.ask("hi")).system.includes("Greets."));
+    await t.reopen();
+    assert.ok((await t.ask("hi again")).system.includes("Greets."), "the section is rendered by the new harness");
+    assert.ok((await t.ask("/skill:greet now")).user.includes("Say HELLO-AGAIN."));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a skill under ~/.agents/skills is seen by every session on the machine, whatever its workspace", async () => {
+  // Each Backend session (the Manager's, a job run's, a chat's) is its own harness on its own database and workspace,
+  // all built with the same createSkills(): this is that, with two of them.
+  const first = await rig();
+  const second = await rig({ home: first.home, git: false });
+  try {
+    await first.put(join(first.home, ".agents/skills/shared/SKILL.md"), skillMd("shared", "Installed once, for everyone."));
+    const where = join(first.home, ".agents/skills/shared/SKILL.md");
+    for (const t of [first, second]) {
+      const { system } = await t.ask("hi");
+      assert.ok(system.includes("Installed once, for everyone."));
+      assert.ok(system.includes(where));
+    }
+    assert.notEqual(first.work, second.work, "different workspaces");
+    await second.put(join(second.work, ".agents/skills/own/SKILL.md"), skillMd("own", "Only the second workspace."));
+    assert.ok(!(await first.ask("hi")).system.includes("Only the second workspace."), "workspace skills stay with their workspace");
+    assert.ok((await second.ask("hi")).system.includes("Only the second workspace."));
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+  }
+});
+
+test("discovery is remembered for the cache's lifetime, then looks again", async () => {
+  let clock = 1_000;
+  const t = await rig({ cacheMs: 5_000, now: () => clock });
+  try {
+    await t.put(join(t.home, ".agents/skills/first/SKILL.md"), skillMd("first", "Already there."));
+    assert.ok((await t.ask("hi")).system.includes("Already there."));
+    await t.put(join(t.home, ".agents/skills/second/SKILL.md"), skillMd("second", "Added a moment later."));
+    clock += 4_999;
+    assert.ok(!(await t.ask("hi")).system.includes("Added a moment later."), "still the remembered list");
+    clock += 1;
+    const { system } = await t.ask("hi");
+    assert.ok(system.includes("Added a moment later."), "found once the time is up");
+    assert.ok(system.includes("Already there."));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("requests that arrive together share one discovery, and a warning is said once", async () => {
+  const t = await rig({ cacheMs: 60_000 });
+  try {
+    await t.put(join(t.home, ".agents/skills/broken/SKILL.md"), "---\nname: broken\n---\nNo description.\n");
+    await t.ask("one");
+    await t.ask("two");
+    await t.ask("three");
+    assert.equal(t.warnings.filter((w) => /description is required/.test(w)).length, 1);
+  } finally {
+    await t.cleanup();
+  }
 });

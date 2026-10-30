@@ -5,9 +5,14 @@
 //   skills section   name, description and path of each skill; the agent reads SKILL.md itself with `read`
 //   /skill:name      a prompt starting with it is sent with that skill's instructions inlined
 //
-// Searched: ~/.agents/skills, then `.agents/skills` and `.pi/skills` from the workspace up to the repo root. Skipped:
-// malformed skills and ones without a description. On a name collision the first one found wins, with a warning.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+// Searched: ~/.agents/skills, then `.agents/skills` and `.pi/skills` from the workspace up to the repo root (or the
+// filesystem root, with no `.git` on the way). Skipped: malformed skills and ones without a description. On a name
+// collision the first one found wins, with a warning.
+//
+// Discovery reads the folders asynchronously and is remembered per workspace for a few seconds, so a burst of requests
+// walks them once and a new skill shows up within that time. Warnings go to the service log (`~/.dpi/backend.log`, each
+// said once), where the person who installed the skill looks when it does not appear.
+import { access, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -34,20 +39,22 @@ export function parseFrontmatter(text: string): { data: Record<string, unknown>;
 
 // ------------------------------------------------------------------ discovery
 
+const exists = (p: string) => access(p).then(() => true, () => false);
+
 /** Every directory that can hold skills for a workspace, in precedence order. */
-function searchRoots(cwd: string, home: string) {
+async function searchRoots(cwd: string, home: string) {
   const roots = [join(home, ".agents", "skills")];
   for (let dir = cwd; ; dir = dirname(dir)) {
     roots.push(join(dir, ".agents", "skills"), join(dir, ".pi", "skills"));
-    if (existsSync(join(dir, ".git")) || dirname(dir) === dir) break;
+    if ((await exists(join(dir, ".git"))) || dirname(dir) === dir) break;
   }
   return roots;
 }
 
 /** `dir` is a skill if it holds a SKILL.md; otherwise each non-hidden subfolder is searched. Symlinks are followed. */
-function walk(dir: string, found: Skill[], warn: (m: string) => void, visited = new Set<string>()) {
+async function walk(dir: string, found: Skill[], warn: (m: string) => void, visited = new Set<string>()): Promise<void> {
   try {
-    const real = realpathSync(dir);
+    const real = await realpath(dir);
     if (visited.has(real)) return;
     visited.add(real);
   } catch {
@@ -55,31 +62,27 @@ function walk(dir: string, found: Skill[], warn: (m: string) => void, visited = 
   }
   let entries;
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return;
   }
   const file = join(dir, "SKILL.md");
-  if (entries.some((e) => e.name === "SKILL.md") && isFile(file)) return load(file, found, warn);
+  if (entries.some((e) => e.name === "SKILL.md") && (await isFile(file))) return load(file, found, warn);
   for (const e of entries) {
     if (e.name.startsWith(".") || e.name === "node_modules") continue;
     const path = join(dir, e.name);
-    if (e.isDirectory() || (e.isSymbolicLink() && isDirectory(path))) walk(path, found, warn, visited);
+    if (e.isDirectory() || (e.isSymbolicLink() && (await isDirectory(path)))) await walk(path, found, warn, visited);
   }
 }
-const isFile = (p: string) => statOr(p)?.isFile() ?? false;
-const isDirectory = (p: string) => statOr(p)?.isDirectory() ?? false;
-function statOr(p: string) {
-  try {
-    return statSync(p);
-  } catch {}
-}
+const isFile = async (p: string) => (await statOr(p))?.isFile() ?? false;
+const isDirectory = async (p: string) => (await statOr(p))?.isDirectory() ?? false;
+const statOr = (p: string) => stat(p).catch(() => undefined);
 
-function load(path: string, found: Skill[], warn: (m: string) => void) {
+async function load(path: string, found: Skill[], warn: (m: string) => void) {
   const dir = dirname(path);
   let data;
   try {
-    data = parseFrontmatter(readFileSync(path, "utf8")).data;
+    data = parseFrontmatter(await readFile(path, "utf8")).data;
   } catch (e) {
     return warn(`skipped ${path}: ${(e as Error).message}`);
   }
@@ -93,16 +96,13 @@ function load(path: string, found: Skill[], warn: (m: string) => void) {
 }
 
 /** All skills visible from `cwd`: first found wins by name, and a repeat of the same file is ignored silently. */
-export function discoverSkills(cwd: string, home: string, warn: (m: string) => void): Skill[] {
+export async function discoverSkills(cwd: string, home: string, warn: (m: string) => void): Promise<Skill[]> {
   const found: Skill[] = [];
-  for (const root of searchRoots(cwd, home)) walk(root, found, warn);
+  for (const root of await searchRoots(cwd, home)) await walk(root, found, warn);
   const byName = new Map<string, Skill>();
   const real = new Set<string>();
   for (const skill of found) {
-    let id = skill.path;
-    try {
-      id = realpathSync(skill.path);
-    } catch {}
+    const id = await realpath(skill.path).catch(() => skill.path);
     if (real.has(id)) continue;
     real.add(id);
     const winner = byName.get(skill.name);
@@ -137,13 +137,13 @@ function render(skills: Skill[]) {
 }
 
 /** `/skill:name args` → the skill's instructions, then the args. Anything else (or an unknown name) is left alone. */
-function expand(text: string, skills: Skill[], warn: (m: string) => void) {
+async function expand(text: string, skills: Skill[], warn: (m: string) => void) {
   const m = /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   const skill = m && skills.find((s) => s.name === m[1]);
   if (!m || !skill) return text;
   let body: string;
   try {
-    body = parseFrontmatter(readFileSync(skill.path, "utf8")).body.trim();
+    body = parseFrontmatter(await readFile(skill.path, "utf8")).body.trim();
   } catch (e) {
     warn(`/skill:${skill.name} could not read ${skill.path}: ${(e as Error).message}`);
     return text;
@@ -155,22 +155,36 @@ function expand(text: string, skills: Skill[], warn: (m: string) => void) {
 type Content = UserMessage["content"];
 const textOf = (c: Content) => (typeof c === "string" ? c : c.map((b) => (b.type === "text" ? (b.text ?? "") : "")).join(""));
 
-/** `home` and `warn` are injectable so tests never read the real `~/.agents/skills`. */
-export function createSkills(opts: { home?: string; warn?: (message: string) => void } = {}): Extension {
+/** How long what a workspace's folders held is believed. */
+const CACHE_MS = 5_000;
+
+/** `home`, `warn`, the cache's lifetime and the clock are injectable so tests never read the real `~/.agents/skills`, and never wait. */
+export function createSkills(opts: { home?: string; warn?: (message: string) => void; cacheMs?: number; now?: () => number } = {}): Extension {
   const home = opts.home ?? homedir();
+  const cacheMs = opts.cacheMs ?? CACHE_MS;
+  const now = opts.now ?? Date.now;
   const out = opts.warn ?? ((m: string) => console.error(`[skills] ${m}`));
   // Discovery runs on every request, so say each thing once.
   const said = new Set<string>();
   const warn = (m: string) => said.has(m) || (said.add(m), out(m), true);
   // What each conversation's last section render found, so /skill:name expands against the list the model was shown.
   const seen = new Map<string, Skill[]>();
+  // One discovery per workspace at a time, believed for `cacheMs`; requests that arrive meanwhile share it.
+  const cache = new Map<string, { at: number; skills: Promise<Skill[]> }>();
+  const skillsFor = (cwd: string) => {
+    const cached = cache.get(cwd);
+    if (cached && now() - cached.at < cacheMs) return cached.skills;
+    const skills = discoverSkills(cwd, home, warn);
+    cache.set(cwd, { at: now(), skills });
+    return skills;
+  };
   return defineExtension({
     name: "skills",
     sections: [
       section(
         "skills",
-        (input) => {
-          const skills = discoverSkills(input.agent.cwd ?? process.cwd(), home, warn);
+        async (input) => {
+          const skills = await skillsFor(input.agent.cwd ?? process.cwd());
           seen.set(String(input.conversationId), skills);
           return render(skills);
         },
@@ -179,21 +193,28 @@ export function createSkills(opts: { home?: string; warn?: (message: string) => 
     ],
     hooks: [
       hook(GenerationTask, {
-        beforeRequest: ({ messages }, api) => {
+        beforeRequest: async ({ messages }, api) => {
           const skills = seen.get(String(api.conversationId));
           if (!skills?.length) return;
           let changed = false;
-          const next = messages.map((m) => {
-            if (m.role !== "user") return m;
+          const next = [];
+          for (const m of messages) {
+            if (m.role !== "user") {
+              next.push(m);
+              continue;
+            }
             const content: Content = m.content;
             const was = textOf(content);
-            const now = expand(was, skills, warn);
-            if (now === was) return m;
+            const expanded = await expand(was, skills, warn);
+            if (expanded === was) {
+              next.push(m);
+              continue;
+            }
             changed = true;
             // Keep any image blocks; the expanded text replaces the text ones.
             const rest = typeof content === "string" ? [] : content.filter((b) => b.type !== "text");
-            return { ...m, content: rest.length ? [{ type: "text" as const, text: now }, ...rest] : now };
-          });
+            next.push({ ...m, content: rest.length ? [{ type: "text" as const, text: expanded }, ...rest] : expanded });
+          }
           return changed ? { messages: next } : undefined;
         },
       }),

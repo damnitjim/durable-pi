@@ -79,6 +79,8 @@ Templates live in [`deploy/`](deploy/). The operator skill [`.claude/skills/agen
 ~/.dpi/backend.log                              service log
 ```
 
+Skills (`SKILL.md` folders in `~/.agents/skills` and in `.agents/skills` or `.pi/skills` from a session's workspace up to its repo root) are listed in every session's prompt. A new skill appears within about five seconds. A skill that is skipped (no description, bad frontmatter) or loses a name collision is reported once in `~/.dpi/backend.log`, on a line starting `[skills]`.
+
 ## Guarantees and boundaries
 
 - Closing a client never stops work. A backend restart resumes unfinished tasks from their checkpoints. Replay-safe tools may rerun, and unsafe ones return an interrupted result.
