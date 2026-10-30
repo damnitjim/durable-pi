@@ -20,6 +20,7 @@ async function stubScheduler() {
     { id: "s9/q10", questionId: "q10", jobId: "j1", question: "Delete the branch?", choices: ["Yes", "No"], askedAt: 1, timeoutAt: 2 },
   ];
   let refuse: string | undefined;
+  const pairing: { paired: boolean; userId?: number } = { paired: true, userId: 4242 };
   const server: Server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -48,13 +49,14 @@ async function stubScheduler() {
     }
     if (url.pathname === "/runs") return send(200, [{ id: "j1:1", jobId: "j1", scheduledAt: 1, status: "finished", summary: "ok", startedAt: 1, finishedAt: 2, sessionId: "s1" }]);
     if (url.pathname === "/runs/j1%3A1") return send(200, { id: "j1:1", jobId: "j1", scheduledAt: 1, status: "finished", summary: "ok", startedAt: 1, finishedAt: 2, sessionId: "s1", answer: "All good" });
+    if (req.method === "GET" && url.pathname === "/telegram/pairing") return send(200, pairing);
     if (url.pathname === "/questions") return send(200, questions);
     if (req.method === "POST" && url.pathname === "/questions/s9%2Fq1/answer") return send(200, { ...questions[0], status: "answered", answer: record.body.answer });
     send(404, { error: "not found" });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  return { url, seen, jobs, refuseWith: (message?: string) => (refuse = message), close: (() => {
+  return { url, seen, jobs, pairing, refuseWith: (message?: string) => (refuse = message), close: (() => {
       let closed = false;
       return () => (closed ? Promise.resolve() : ((closed = true), new Promise<void>((resolve) => (server.closeAllConnections(), server.close(() => resolve())))));
     })() };
@@ -204,6 +206,23 @@ test("run, stop and reset each wait for approval; the run lists and the question
     assert.match(await out('manage: show_run {"run":"j1:1"}'), /Answer: All good/);
     assert.match(await out("manage: list_questions"), /s9\/q1: Deploy it\? \[Approve \/ Deny\]/);
     assert.equal(await m.pending(), undefined, "the reads asked the user nothing");
+  } finally {
+    await m.close();
+  }
+});
+
+test("telegram_status reads whether the bot is paired, needs no approval, and offers nothing to change it", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    const out = async (prompt: string) => (await m.settle(await m.say(prompt))).answer!.text;
+    assert.match(await out("manage: telegram_status"), /Telegram is paired to account 4242/);
+    m.scheduler.pairing.paired = false;
+    delete m.scheduler.pairing.userId;
+    assert.match(await out("manage: telegram_status"), /not paired yet/);
+    assert.equal(await m.pending(), undefined, "a read asks the user nothing");
+    assert.deepEqual(m.scheduler.seen.filter((r) => r.path === "/telegram/pairing").map((r) => r.method), ["GET", "GET"]);
+    assert.match(await out("manage: pair_telegram"), /Tool "pair_telegram" not found|not available/i);
   } finally {
     await m.close();
   }
