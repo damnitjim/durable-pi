@@ -42,7 +42,7 @@ With the repo's network config, `just net up local && just backend run` does the
 | `DPI_ENV_FILE` | `$DPI_HOME/backend.env` | the env file to read |
 | `DPI_PROVIDER` | `pi` | `pi` reuses pi's credentials and default model; `faux` gives a free deterministic model for tests |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | pi's agent folder: `settings.json`, `auth.json`, `models.json` |
-| `TYPESAFE_API_KEY` | | optional: `jev-damage-control` asks Jev with it, else through OpenRouter |
+| `TYPESAFE_API_KEY` | | optional: `jev-damage-control` asks Jev with it, else through OpenRouter with pi's OpenRouter key (auth.json, or `OPENROUTER_API_KEY`) |
 
 Flags `--port`, `--host`, `--name`, `--start-dirs`, `--data-dir` and `--env-file` override the env.
 

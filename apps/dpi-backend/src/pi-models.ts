@@ -12,12 +12,12 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { createProvider, type MutableModels } from "@earendil-works/pi-ai/models";
+import { createProvider, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
-import type { ApiKeyCredential, Credential, CredentialStore } from "@earendil-works/pi-ai";
+import type { ApiKeyCredential, Credential, CredentialStore, ProviderStreams } from "@earendil-works/pi-ai";
 
 export type ModelRef = { provider: string; modelId: string };
 
@@ -27,6 +27,12 @@ export interface PiModels {
   defaultModel: ModelRef;
   /** `provider/model` (split at the first slash) or a ref → a model the Backend can run; the default for none. */
   resolve(model?: string | ModelRef): Promise<ModelRef>;
+  /**
+   * Whether the model is one pi has enabled (`enabledModels` in settings.json: `provider/model` patterns where `*` matches
+   * anything). With none set every model is; the default model always is. Only what the model list shows: any model
+   * with a credential can still be asked for by name.
+   */
+  isEnabled(model: ModelRef): boolean;
 }
 
 export const defaultAgentDir = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -146,13 +152,10 @@ const APIS = {
 type KnownApi = keyof typeof APIS;
 const isKnownApi = (api: string | undefined): api is KnownApi => !!api && api in APIS;
 
-function customProvider(id: string, config: CustomProvider, env: NodeJS.ProcessEnv, run: Run) {
+/** The `models` of a models.json entry as pi-ai models, each with the api it needs. */
+function customModels(id: string, config: CustomProvider, baseUrl: string) {
   const fail = (what: string) => new Error(`models.json: provider "${id}" ${what}`);
-  if (!config.baseUrl) throw fail("needs a baseUrl");
-  const baseUrl = config.baseUrl;
-  if (config.api !== undefined && !isKnownApi(config.api))
-    throw fail(`uses api "${config.api}", which the Backend doesn't support (${Object.keys(APIS).join(", ")})`);
-  const models = (config.models ?? []).map((m) => {
+  return (config.models ?? []).map((m) => {
     const api = m.api ?? config.api;
     if (!isKnownApi(api)) throw fail(`model "${m.id}" needs an api`);
     return {
@@ -169,6 +172,15 @@ function customProvider(id: string, config: CustomProvider, env: NodeJS.ProcessE
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...m.cost },
     };
   });
+}
+
+function customProvider(id: string, config: CustomProvider, env: NodeJS.ProcessEnv, run: Run) {
+  const fail = (what: string) => new Error(`models.json: provider "${id}" ${what}`);
+  if (!config.baseUrl) throw fail("needs a baseUrl");
+  const baseUrl = config.baseUrl;
+  if (config.api !== undefined && !isKnownApi(config.api))
+    throw fail(`uses api "${config.api}", which the Backend doesn't support (${Object.keys(APIS).join(", ")})`);
+  const models = customModels(id, config, baseUrl);
   const streams = Object.fromEntries(Object.entries(APIS).map(([api, make]) => [api, make()]));
   return createProvider({
     id,
@@ -188,6 +200,67 @@ function customProvider(id: string, config: CustomProvider, env: NodeJS.ProcessE
   });
 }
 
+/**
+ * A models.json entry named like a built-in provider changes that provider, as in pi: a `baseUrl` points all its models
+ * somewhere else (a proxy, a gateway), `headers` are added to their requests, `models` are added (or replace the
+ * built-in model of the same id), and an `apiKey` is used when auth.json has none. Everything else stays the built-in's.
+ */
+function mergedProvider(builtin: Provider, id: string, config: CustomProvider, env: NodeJS.ProcessEnv, run: Run): Provider {
+  const fail = (what: string) => new Error(`models.json: provider "${id}" ${what}`);
+  if (config.api !== undefined && !isKnownApi(config.api))
+    throw fail(`uses api "${config.api}", which the Backend doesn't support (${Object.keys(APIS).join(", ")})`);
+  const baseUrl = config.baseUrl ?? builtin.baseUrl ?? builtin.getModels()[0]?.baseUrl;
+  if (config.models?.length && !baseUrl) throw fail("adds models and needs a baseUrl to send them to");
+  const added = config.models?.length ? customModels(id, config, baseUrl!) : [];
+  const addedIds = new Set(added.map((m) => m.id));
+  type WithEndpoint = { baseUrl?: string; headers?: Record<string, string> };
+  const redirect = <M extends WithEndpoint>(m: M): M => ({
+    ...m,
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+    ...(config.headers ? { headers: { ...m.headers, ...config.headers } } : {}),
+  });
+  const chat = (m: { type?: string }) => m.type === undefined || m.type === "chat";
+  const apiKey = builtin.auth.apiKey;
+  const auth =
+    apiKey && config.apiKey
+      ? {
+          ...builtin.auth,
+          apiKey: {
+            ...apiKey,
+            check: undefined, // the key from models.json counts as configured: let the resolution below say so
+            resolve: async (input: Parameters<typeof apiKey.resolve>[0]) => {
+              if (input.credential?.key) return apiKey.resolve(input);
+              const key = await resolveValue(config.apiKey!, env, run);
+              return key ? { auth: { apiKey: key }, source: "models.json" } : apiKey.resolve(input);
+            },
+          },
+        }
+      : builtin.auth;
+  // A built-in provider streams all its chat models one way, whatever a model's `api` says; a model added here speaks the
+  // api models.json gave it, so it is streamed by that implementation and everything else by the built-in's.
+  const own = added.length ? (Object.fromEntries(Object.entries(APIS).map(([api, make]) => [api, make()])) as Record<string, ProviderStreams>) : {};
+  const streamerOf = (model: { id: string; api: string }): ProviderStreams =>
+    (addedIds.has(model.id) ? own[model.api] : undefined) ?? (builtin as unknown as ProviderStreams);
+  return Object.create(builtin, {
+    stream: { value: (model: never, ...rest: unknown[]) => (streamerOf(model) as { stream: (...a: unknown[]) => unknown }).stream(model, ...rest) },
+    streamSimple: { value: (model: never, ...rest: unknown[]) => (streamerOf(model) as { streamSimple: (...a: unknown[]) => unknown }).streamSimple(model, ...rest) },
+    baseUrl: { value: baseUrl },
+    ...(config.headers ? { headers: { value: { ...builtin.headers, ...config.headers } } } : {}),
+    auth: { value: auth },
+    getModels: { value: () => [...builtin.getModels().filter((m) => !addedIds.has(m.id)).map(redirect), ...added] },
+    ...(builtin.getAllModels
+      ? {
+          getAllModels: {
+            value: () => [
+              ...builtin.getAllModels!().filter((m) => !(chat(m) && addedIds.has(m.id))).map((m) => (chat(m) ? redirect(m as never) : m)),
+              ...added,
+            ],
+          },
+        }
+      : {}),
+  }) as Provider;
+}
+
 // ------------------------------------------------------------------ loading
 
 export async function loadPiModels(
@@ -196,7 +269,7 @@ export async function loadPiModels(
   const dir = options.agentDir ?? defaultAgentDir();
   const env = options.env ?? process.env;
   const run = commandRunner();
-  const settings = (await readJson<{ defaultProvider?: string; defaultModel?: string }>(join(dir, "settings.json"))) ?? {};
+  const settings = (await readJson<{ defaultProvider?: string; defaultModel?: string; enabledModels?: unknown }>(join(dir, "settings.json"))) ?? {};
   const stored = (await readJson<Record<string, Credential>>(join(dir, "auth.json"))) ?? {};
   const custom = (await readJson<{ providers?: Record<string, CustomProvider> }>(join(dir, "models.json")))?.providers ?? {};
 
@@ -207,10 +280,10 @@ export async function loadPiModels(
       fileExists: async (path) => existsSync(path.replace(/^~(?=\/|$)/, homedir())),
     },
   });
-  for (const id of Object.keys(custom))
-    if (models.getProvider(id))
-      throw new Error(`models.json: "${id}" is a built-in provider; the Backend can't override built-in providers yet, so use a new provider name.`);
-  for (const [id, config] of Object.entries(custom)) models.setProvider(customProvider(id, config, env, run));
+  for (const [id, config] of Object.entries(custom)) {
+    const builtin = models.getProvider(id);
+    models.setProvider(builtin ? mergedProvider(builtin, id, config, env, run) : customProvider(id, config, env, run));
+  }
 
   const known = async (ref: ModelRef) => {
     if (!models.getModel(ref.provider, ref.modelId)) throw new Error(`Unknown model ${ref.provider}/${ref.modelId}`);
@@ -237,5 +310,10 @@ export async function loadPiModels(
     throw new Error(`pi has no default model: set defaultProvider and defaultModel in ${join(dir, "settings.json")} (pi's /model, then Ctrl+S).`);
   const defaultModel: ModelRef = { provider: settings.defaultProvider, modelId: settings.defaultModel };
   await known(defaultModel);
-  return { models, defaultModel, resolve };
+  const patterns = (Array.isArray(settings.enabledModels) ? settings.enabledModels : [])
+    .filter((p): p is string => typeof p === "string" && p.trim() !== "")
+    .map((p) => new RegExp(`^${p.trim().split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`));
+  const isEnabled = (model: ModelRef) =>
+    patterns.length === 0 || (model.provider === defaultModel.provider && model.modelId === defaultModel.modelId) || patterns.some((re) => re.test(`${model.provider}/${model.modelId}`));
+  return { models, defaultModel, resolve, isEnabled };
 }

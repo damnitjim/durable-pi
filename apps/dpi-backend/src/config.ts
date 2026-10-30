@@ -47,6 +47,8 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
     token: env.DPI_TOKEN ?? "",
     ...(env.DPI_RESTART_LIMIT ? { restartLimit: Number(env.DPI_RESTART_LIMIT) } : {}),
   };
+  if (env.DPI_PROVIDER && env.DPI_PROVIDER !== "faux" && env.DPI_PROVIDER !== "pi")
+    console.error(`[config] DPI_PROVIDER=${env.DPI_PROVIDER} is not a provider any more: the Backend uses pi's setup (pi's keys and default model). Set it to "pi" or "faux", or remove it.`);
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
     throw Error(`Invalid port: ${config.port}`);
   if (config.restartLimit !== undefined && !(Number.isInteger(config.restartLimit) && config.restartLimit >= 1))

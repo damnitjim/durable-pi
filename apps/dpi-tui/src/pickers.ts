@@ -162,7 +162,7 @@ function chooseModel(app: App, current?: string) {
     const models = app.info.models;
     const picker = new Picker(
       `Model (${app.device.id})`,
-      models.map((m) => ({ value: `${m.provider}/${m.id}`, label: m.name, description: `${m.tier} │ ${m.provider}` })),
+      models.map((m) => ({ value: `${m.provider}/${m.id}`, label: m.name, description: m.tier ? `${m.tier} │ ${m.provider}` : m.provider })),
       (item) => {
         app.closeOverlay();
         done(models.find((m) => `${m.provider}/${m.id}` === item.value));
