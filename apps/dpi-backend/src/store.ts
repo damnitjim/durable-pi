@@ -38,7 +38,7 @@ import { homedir, hostname, platform } from "node:os";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels, type MutableModels } from "@earendil-works/pi-ai/models";
-import type { PiModels } from "./pi-models.js";
+import { CredentialCommandError, type PiModels } from "./pi-models.js";
 import { fauxModels, installFaux } from "./faux.js";
 import { ATTENTION_DOC, AttentionDoc, createAskUser } from "./ask-user.js";
 import {
@@ -319,6 +319,8 @@ export class Store {
       try {
         await this.options.pi!.resolve(m);
       } catch (e) {
+        // A failing key command is this device's setup, not the caller's choice of model: a server error, not a 400.
+        if (e instanceof CredentialCommandError) throw new ApiFault("internal", (e as Error).message);
         throw invalid(`${(e as Error).message}. Choose one from GET /v1/device models`);
       }
     }

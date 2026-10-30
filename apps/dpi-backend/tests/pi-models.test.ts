@@ -6,7 +6,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
-import { loadPiModels } from "../src/pi-models.js";
+import { CredentialCommandError, loadPiModels } from "../src/pi-models.js";
 
 async function agentDir(files: { settings?: object; auth?: object; models?: object }) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "dpi-pi-")));
@@ -59,6 +59,26 @@ test("a failing `!command` leaves the key unresolved, with a message that names 
   });
   try {
     await assert.rejects(() => loadPiModels({ agentDir: t.dir, env: noEnv }), /openai.*(key|credential)/i);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a model whose key command fails is a CredentialCommandError, the Backend's own setup and not a bad request", async () => {
+  const t = await agentDir({
+    settings: { defaultProvider: "local-server", defaultModel: "Qwen3" },
+    models: {
+      providers: {
+        "local-server": { baseUrl: "http://localhost:8080/v1", api: "openai-completions", apiKey: "literal", models: [{ id: "Qwen3" }] },
+        "locked-vault": { baseUrl: "http://localhost:9090/v1", api: "openai-completions", apiKey: "!exit 3", models: [{ id: "M" }] },
+      },
+    },
+  });
+  try {
+    const pi = await loadPiModels({ agentDir: t.dir, env: noEnv });
+    await assert.rejects(() => pi.resolve("locked-vault/M"), (e: unknown) => e instanceof CredentialCommandError && /locked-vault/.test((e as Error).message));
+    // Other refusals stay what they were: the caller asked for something that is not there.
+    await assert.rejects(() => pi.resolve("local-server/NoSuch"), (e: unknown) => !(e instanceof CredentialCommandError) && /Unknown model/.test((e as Error).message));
   } finally {
     await t.cleanup();
   }
