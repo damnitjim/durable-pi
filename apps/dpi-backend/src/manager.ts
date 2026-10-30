@@ -242,6 +242,34 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       }),
     }),
     defineTool({
+      name: "pause_job",
+      description: "Pause a job: it stops firing until resumed and keeps its definition. A run already going is left alone. The user must approve.",
+      parameters: byName,
+      execute: guarded(async ({ job }, api, context) => {
+        const found = findJob(await jobs(), job);
+        if (found.status === "paused") return text(`"${found.name}" is already paused.`);
+        if (found.status === "done") return text(`"${found.name}" has finished; there is nothing to pause.`);
+        const { approved, said, questionId } = await confirm(`Pause "${found.name}"?`, `${formatJobLine(found)}\n\nIt stops firing until resumed. A run already going is left alone.`, api, context);
+        if (!approved) return NOT_DONE("paused", said);
+        await scheduler.request("POST", `${jobPath(found.id)}/pause`, undefined, questionId);
+        return text(`Paused "${found.name}".`);
+      }),
+    }),
+    defineTool({
+      name: "resume_job",
+      description: "Resume a paused job. It waits for its next occurrence: runs missed while it was paused are not made up. The user must approve.",
+      parameters: byName,
+      execute: guarded(async ({ job }, api, context) => {
+        const found = findJob(await jobs(), job);
+        if (found.status === "active") return text(`"${found.name}" is not paused.`);
+        if (found.status === "done") return text(`"${found.name}" has finished; change its schedule to run it again.`);
+        const { approved, said, questionId } = await confirm(`Resume "${found.name}"?`, `${formatJobLine(found)}\n\nIt waits for its next occurrence: nothing missed while it was paused is caught up.`, api, context);
+        if (!approved) return NOT_DONE("resumed", said);
+        const resumed = (await scheduler.request("POST", `${jobPath(found.id)}/resume`, undefined, questionId)) as Preview;
+        return text(`Resumed "${found.name}". Next run: ${resumed.nextFireTimes?.[0] ?? "none"}.`);
+      }),
+    }),
+    defineTool({
       name: "run_job_now",
       description: "Start a run of a job right now, without moving its schedule. The user must approve. Refused while its previous run is still active.",
       parameters: byName,
@@ -365,8 +393,8 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
 
 /** The Manager's standing instructions. Constant on purpose: a prompt section must render the same every time. */
 export const MANAGER_PROMPT = [
-  "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, run, stop and delete them with your tools. Be brief.",
+  "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, pause, resume, run, stop and delete them with your tools. Be brief.",
   'Each message starts with a line in square brackets giving the time it was sent and the user\'s timezone. Turn times like "at 5" into the next such moment in that timezone, written as an ISO time with its offset, or as a cron with that IANA timezone for something that repeats. Ask only if what they said is truly ambiguous.',
   'Infer settings from how they describe the job ("only ping me if it breaks" means notifyMode when-needed). Write each job\'s prompt so it makes sense with no other context.',
-  "Creating, changing, deleting, running, stopping and resetting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
+  "Creating, changing, deleting, pausing, resuming, running, stopping and resetting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
 ].join("\n\n");
