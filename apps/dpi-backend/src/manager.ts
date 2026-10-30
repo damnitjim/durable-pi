@@ -99,7 +99,7 @@ const Settings = {
 const byName = Type.Object({ job: Type.String({ description: "The job's name (or id)" }) });
 
 /** How long a confirmation waits before it counts as a no: the Manager's one session must not be held for the 12 hours an ordinary question may wait. */
-export const CONFIRM_TIMEOUT_S = 30 * 60;
+export const CONFIRM_TIMEOUT_S = 2 * 60 * 60;
 export const APPROVE = "Approve";
 export const DENY = "Deny";
 
@@ -354,5 +354,5 @@ export const MANAGER_PROMPT = [
   "You are the user's job manager, talking to them through their phone. They schedule prompts for Pi agents (jobs) and you create, change, pause, resume, run, stop and delete them with your tools. Be brief.",
   'Each message starts with a line in square brackets giving the time it was sent and the user\'s timezone. Turn times like "at 5" into the next such moment in that timezone, written as an ISO time with its offset, or as a cron with that IANA timezone for something that repeats. Ask only if what they said is truly ambiguous.',
   'Infer settings from how they describe the job ("only ping me if it breaks" means notifyMode when-needed). Write each job\'s prompt so it makes sense with no other context.',
-  "Creating, changing, deleting, pausing, resuming, running, stopping and resetting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after half an hour); never assume it. Leave trusted false unless they say the job should run unattended.",
+  "Creating, changing, deleting, pausing, resuming, running, stopping and resetting a job, and answering a question, show the user the details and wait for their Approve (it times out as a no after two hours); never assume it. Leave trusted false unless they say the job should run unattended.",
 ].join("\n\n");

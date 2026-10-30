@@ -333,13 +333,14 @@ test("the Manager's instructions are constant text and say where the time comes 
   assert.doesNotMatch(MANAGER_PROMPT, /\b20\d\d-\d\d-\d\d\b/, "no date baked in: a prompt section must render the same every time");
 });
 
-test("a confirmation times out as a no after half an hour, not the 12 hours of an ordinary question", async () => {
+test("a confirmation times out as a no after two hours, not the 12 hours of an ordinary question", async () => {
   const m = await setup();
   try {
     await m.enable();
     await m.say(`manage: create_job ${JSON.stringify(remind)}`);
     await until(async () => (await m.pending()) !== undefined, 15000, "the question");
     const q = (await m.pending())!;
+    assert.equal(CONFIRM_TIMEOUT_S, 2 * 3600);
     assert.equal(q.timeoutAt - q.askedAt, CONFIRM_TIMEOUT_S * 1000);
     await m.answer(q.id, "Deny");
   } finally {
