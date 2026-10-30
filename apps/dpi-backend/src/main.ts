@@ -22,6 +22,7 @@ const store = await Store.open({
   name: config.name,
   provider: config.provider,
   pi,
+  ...(config.restartLimit !== undefined ? { restartLimit: config.restartLimit } : {}),
 });
 
 const app = express();

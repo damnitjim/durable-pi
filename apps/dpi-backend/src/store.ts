@@ -98,6 +98,8 @@ export interface StoreOptions {
   pi?: PiModels;
   /** The guard's `allow`/`ask` file; default `~/.durable-jim-agent/guard.json`. */
   guardFile?: string;
+  /** pi-durable's crash-loop guard: a task cut off by this many crashes in a row is parked. Its default (5) when unset. */
+  restartLimit?: number;
 }
 
 /** Agent documents a client may read or stream, by kind. */
@@ -537,6 +539,7 @@ export class Store {
               return compaction();
             },
             progress: { partialIntervalMs: 100, outputIntervalMs: 100 },
+            ...(this.options.restartLimit !== undefined ? { restartLimit: this.options.restartLimit } : {}),
           },
           onReport: (e) => console.error("[durable]", String(e)),
         },
