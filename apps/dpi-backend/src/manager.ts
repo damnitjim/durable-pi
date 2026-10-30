@@ -10,6 +10,7 @@ import { defineExtension, defineTool, hook, section, ToolTask, type ToolExecutio
 import type { Context } from "@earendil-works/chord/context";
 import { askAndWait, NO_ANSWER } from "./ask-user.js";
 import type { Job, Preview, Question, Run } from "./scheduler-shapes.js";
+import { describeSchedule, findJob, formatPreview } from "./scheduler-reading.js";
 
 export const MANAGER_EXTENSION = "durable-jim-manager";
 
@@ -67,37 +68,10 @@ export function schedulerFromEnvironment(env: NodeJS.ProcessEnv = process.env): 
 // ---------------------------------------------------------------- shapes (what the Scheduler returns; see scheduler-shapes.ts)
 
 const iso = (ms: number | null) => (ms === null ? "-" : new Date(ms).toISOString().replace(".000Z", "Z"));
-const describeSchedule = (j: Pick<Job, "schedule">) => (j.schedule.kind === "once" ? `once at ${j.schedule.at}` : `cron "${j.schedule.expr}" (${j.schedule.timezone})`);
-
-/** The whole job, for a confirmation: everything the user is agreeing to. */
-function formatPreview(job: Preview): string {
-  return [
-    `Name: ${job.name}`,
-    `Schedule: ${describeSchedule(job)}`,
-    `Next runs: ${job.nextFireTimes.length ? job.nextFireTimes.join(", ") : "none"}`,
-    `Prompt: ${job.prompt}`,
-    `Session: ${job.sessionPolicy === "continuing" ? "continuing (every run shares one session)" : "fresh (every run starts clean)"}`,
-    `Model: ${job.model ?? "pi's default"}`,
-    `Workspace: ${job.workspace ?? "the default workspace"}`,
-    `Notify: ${job.notifyMode}`,
-    `Trusted: ${job.trusted ? "YES, risky tool calls will not ask first" : "no"}`,
-    `Catch-up window: ${Math.round(job.catchUpWindowMs / 60_000)} min`,
-  ].join("\n");
-}
 
 const formatJobLine = (job: Job) => `${job.name} [${job.status}] ${describeSchedule(job)}${job.status === "active" ? ` next ${iso(job.nextFireAt)}` : ""}`;
 const formatRunLine = (run: Run, names: Map<string, string>) =>
   `${iso(run.scheduledAt)} ${names.get(run.jobId) ?? run.jobId} [${run.status}]${run.summary ? ` - ${run.summary}` : ""} (${run.id})`;
-
-/** A job by id, exact name, or name in any case; one match only. */
-function findJob(jobs: Job[], nameOrId: string): Job {
-  const wanted = nameOrId.trim();
-  const tiers = [jobs.filter((j) => j.id === wanted), jobs.filter((j) => j.name === wanted), jobs.filter((j) => j.name.toLowerCase() === wanted.toLowerCase())];
-  const hits = tiers.find((tier) => tier.length > 0);
-  if (!hits) throw new Error(`no job called "${nameOrId}"${jobs.length ? ` (jobs: ${jobs.map((j) => j.name).join(", ")})` : " (there are no jobs yet)"}`);
-  if (hits.length > 1) throw new Error(`"${nameOrId}" matches more than one job (${hits.map((j) => `${j.name}: ${j.id}`).join("; ")}); use the id`);
-  return hits[0]!;
-}
 
 const text = (value: string, details?: object): ToolExecutionResult => ({ output: [{ type: "text", text: value }], ...(details !== undefined ? { details: details as ToolExecutionResult["details"] } : {}) });
 const failure = (message: string): ToolExecutionResult => ({ output: [{ type: "text", text: message }], isError: true });
