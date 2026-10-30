@@ -37,7 +37,7 @@ async function stubScheduler() {
       if (url.searchParams.get("dryRun") !== "true") jobs.push(job);
       return send(url.searchParams.get("dryRun") === "true" ? 200 : 201, preview(job));
     }
-    const one = /^\/jobs\/([^/]+)(\/(run|stop|reset))?$/.exec(url.pathname);
+    const one = /^\/jobs\/([^/]+)(\/(run|stop|reset|pause|resume))?$/.exec(url.pathname);
     if (one) {
       const job = jobs.find((j) => j.id === one[1]);
       if (!job) return send(404, { error: "no such job" });
@@ -46,6 +46,8 @@ async function stubScheduler() {
       if (one[3] === "run") return send(200, { id: `${job.id}:1`, status: "running" });
       if (one[3] === "stop") return send(200, { id: `${job.id}:1`, status: "stopped" });
       if (one[3] === "reset") return send(200, preview(job));
+      if (one[3] === "pause") return send(200, preview({ ...job, status: (job.status = "paused") }));
+      if (one[3] === "resume") return send(200, preview({ ...job, status: (job.status = "active") }));
     }
     if (url.pathname === "/runs") return send(200, [{ id: "j1:1", jobId: "j1", scheduledAt: 1, status: "finished", summary: "ok", startedAt: 1, finishedAt: 2, sessionId: "s1" }]);
     if (url.pathname === "/runs/j1%3A1") return send(200, { id: "j1:1", jobId: "j1", scheduledAt: 1, status: "finished", summary: "ok", startedAt: 1, finishedAt: 2, sessionId: "s1", answer: "All good" });
@@ -204,7 +206,7 @@ test("no Manager tool takes a null in its parameters: some providers handle anyO
   for (const tool of ext.tools) assert.doesNotMatch(JSON.stringify(tool.parameters), /"type":"null"/, `${tool.name} takes a null`);
 });
 
-test("run, stop and reset each wait for approval; the run lists and the question list need none", async () => {
+test("run, stop, reset, pause and resume each wait for approval; the run lists and the question list need none", async () => {
   const m = await setup();
   try {
     await m.enable();
@@ -212,7 +214,7 @@ test("run, stop and reset each wait for approval; the run lists and the question
       const turn = await m.say(prompt);
       await until(async () => (await m.pending()) !== undefined, 15000, "the confirmation");
       const q = (await m.pending())!;
-      assert.deepEqual(m.scheduler.seen.filter((r) => r.method === "POST" && /\/(run|stop|reset)$/.test(r.path)).filter((r) => r.approval === q.id), [], "nothing happens before the answer");
+      assert.deepEqual(m.scheduler.seen.filter((r) => r.method === "POST" && /\/(run|stop|reset|pause|resume)$/.test(r.path)).filter((r) => r.approval === q.id), [], "nothing happens before the answer");
       await m.answer(q.id, "Approve");
       return { text: (await m.settle(turn)).answer!.text, id: q.id };
     };
@@ -221,8 +223,14 @@ test("run, stop and reset each wait for approval; the run lists and the question
     assert.equal(m.scheduler.seen.find((r) => r.path.endsWith("/run"))!.approval, run.id);
     assert.match((await approved('manage: stop_run {"job":"Daily Digest"}')).text, /Stopped the run of "Daily Digest" \(stopped\)/);
     assert.match((await approved('manage: reset_job {"job":"Daily Digest"}')).text, /Reset "Daily Digest"/);
+    const paused = await approved('manage: pause_job {"job":"Daily Digest"}');
+    assert.match(paused.text, /Paused "Daily Digest"/);
+    assert.equal(m.scheduler.seen.find((r) => r.path.endsWith("/pause"))!.approval, paused.id);
+    assert.match((await approved('manage: resume_job {"job":"Daily Digest"}')).text, /Resumed "Daily Digest"/);
 
     const out = async (prompt: string) => (await m.settle(await m.say(prompt))).answer!.text;
+    assert.match(await out('manage: resume_job {"job":"Daily Digest"}'), /not paused/);
+    assert.equal(await m.pending(), undefined, "nothing to resume, so nothing asked");
     assert.match(await out("manage: list_runs"), /Daily Digest \[finished\] - ok \(j1:1\)/);
     assert.match(await out('manage: show_run {"run":"j1:1"}'), /Answer: All good/);
     assert.match(await out("manage: list_questions"), /s9\/q1: Deploy it\? \[Approve \/ Deny\]/);
