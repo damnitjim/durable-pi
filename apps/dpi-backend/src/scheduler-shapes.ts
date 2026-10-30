@@ -16,6 +16,7 @@ export type Job = {
   notifyMode: string;
   trusted: boolean;
   catchUpWindowMs: number;
+  maxRunMs: number;
 };
 export type Preview = Job & { nextFireTimes: string[] };
 export type Run = { id: string; jobId: string; scheduledAt: number; status: string; summary: string | null; startedAt: number; finishedAt: number | null; sessionId: string | null };
