@@ -15,6 +15,8 @@ export interface BackendConfig {
   startDirs: string[];
   provider: "pi" | "faux";
   token: string;
+  /** How many crashes in a row park a task instead of running it again; pi-durable's own default (5) when unset. */
+  restartLimit?: number;
 }
 
 const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
@@ -43,9 +45,12 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
       .map((p) => resolve(expand(p))),
     provider: env.DPI_PROVIDER === "faux" ? "faux" : "pi",
     token: env.DPI_TOKEN ?? "",
+    ...(env.DPI_RESTART_LIMIT ? { restartLimit: Number(env.DPI_RESTART_LIMIT) } : {}),
   };
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
     throw Error(`Invalid port: ${config.port}`);
+  if (config.restartLimit !== undefined && !(Number.isInteger(config.restartLimit) && config.restartLimit >= 1))
+    throw Error(`DPI_RESTART_LIMIT must be a whole number of 1 or more, got ${env.DPI_RESTART_LIMIT}`);
   if (config.token.length < 32)
     throw Error(
       `DPI_TOKEN is missing or shorter than 32 characters (looked in ${envFile}). Create one with: npm run token`,
