@@ -9,6 +9,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, section, ToolTask, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord/context";
 import { askAndWait, NO_ANSWER } from "./ask-user.js";
+import type { Job, Preview, Question, Run } from "./scheduler-shapes.js";
 
 export const MANAGER_EXTENSION = "durable-jim-manager";
 
@@ -63,25 +64,7 @@ export function schedulerFromEnvironment(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-// ---------------------------------------------------------------- shapes (what the Scheduler returns)
-
-type Job = {
-  id: string;
-  name: string;
-  prompt: string;
-  schedule: { kind: "once"; at: string } | { kind: "cron"; expr: string; timezone: string };
-  status: string;
-  nextFireAt: number | null;
-  sessionPolicy: string;
-  model: string | null;
-  workspace: string | null;
-  notifyMode: string;
-  trusted: boolean;
-  catchUpWindowMs: number;
-};
-type Preview = Job & { nextFireTimes: string[] };
-type Run = { id: string; jobId: string; scheduledAt: number; status: string; summary: string | null; startedAt: number; finishedAt: number | null; sessionId: string | null };
-type Question = { id: string; questionId: string; jobId: string | null; question: string; choices?: string[]; askedAt: number; timeoutAt: number };
+// ---------------------------------------------------------------- shapes (what the Scheduler returns; see scheduler-shapes.ts)
 
 const iso = (ms: number | null) => (ms === null ? "-" : new Date(ms).toISOString().replace(".000Z", "Z"));
 const describeSchedule = (j: Pick<Job, "schedule">) => (j.schedule.kind === "once" ? `once at ${j.schedule.at}` : `cron "${j.schedule.expr}" (${j.schedule.timezone})`);
