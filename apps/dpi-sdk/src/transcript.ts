@@ -231,6 +231,29 @@ export function lastFailure(entries: readonly WireEntry[]): { error: string; las
   return { error: last.errorMessage || "The agent ended with an error", ...(lastAction ? { lastAction } : {}) };
 }
 
+/**
+ * What happened in the turn that began with the user entry `userEntryId`: the error its last reply ended with and the last
+ * tool call it made, read from the entries up to the next user input. Unlike `lastFailure` it names the turn, so a
+ * follow-up queued behind it does not change the answer.
+ */
+export function turnAccount(entries: readonly WireEntry[], userEntryId: number): { error?: string; lastAction?: string } {
+  const start = entries.findIndex((entry) => entry.kind === "pi.user" && entry.id === userEntryId);
+  if (start < 0) return {};
+  const next = entries.findIndex((entry, i) => i > start && entry.kind === "pi.user");
+  const turn = entries.slice(start + 1, next < 0 ? undefined : next);
+  let lastAction: string | undefined;
+  let last: WireAssistantMessage | undefined;
+  for (const entry of turn) {
+    if (entry.kind !== "pi.assistant") continue;
+    for (const message of (entry.model ?? []).filter(isAssistant)) {
+      last = message;
+      for (const block of message.content) if (block.type === "toolCall") lastAction = `${block.name} ${JSON.stringify(block.arguments)}`.slice(0, 200);
+    }
+  }
+  const error = last && assistantError(last);
+  return { ...(error ? { error } : {}), ...(lastAction ? { lastAction } : {}) };
+}
+
 export interface UsageSummary {
   tokens: number;
   cost: number;

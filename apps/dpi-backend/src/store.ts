@@ -28,7 +28,7 @@ import {
   THINKING_LEVELS,
   type CompactionSettings,
 } from "../../dpi-sdk/src/api.js";
-import { lastAssistantText, lastFailure, messageText, toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
+import { lastAssistantText, lastFailure, messageText, toMarkdown, toTranscript, turnAccount } from "../../dpi-sdk/src/transcript.js";
 import { ApiFault, invalid, notFound } from "./errors.js";
 import { DatabaseSync } from "node:sqlite";
 import { mkdir, readdir, realpath, rename as renamePath, stat } from "node:fs/promises";
@@ -847,7 +847,12 @@ export class Store {
       const text = (entry?.model ?? []).map((m) => messageText(m as never)).join("").trim();
       return { submissionId, status: "done", answer: { entryId: record.answer as number, text } };
     }
-    if (record.status === "unanswered") return { submissionId, status: "unanswered", reason: record.reason };
+    if (record.status === "unanswered") {
+      // What the turn did before it ended, from its own entries (a follow-up queued behind it is not mixed in). Best effort.
+      const none: { error?: string; lastAction?: string } = {};
+      const account = record.type === "input" && record.entry !== undefined ? await this.accountOf(h, record.conversationId, record.entry as number).catch(() => none) : none;
+      return { submissionId, status: "unanswered", reason: record.reason, ...(account.error || account.lastAction ? { account } : {}) };
+    }
     return { submissionId, status: record.status === "queued" ? "queued" : "pending" };
   }
 
@@ -912,6 +917,12 @@ export class Store {
     } finally {
       view.dispose();
     }
+  }
+
+  private async accountOf(h: Harness, conversationId: ConversationId, userEntryId: number) {
+    const c = await h.conversation(conversationId, ctx);
+    const none: { error?: string; lastAction?: string } = {};
+    return c ? turnAccount(await this.activeEntries(c), userEntryId) : none;
   }
 
   async transcript(c: Conversation, format: string) {
