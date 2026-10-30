@@ -214,11 +214,13 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
         name: Type.Optional(Type.String()),
         prompt: Type.Optional(Type.String()),
         schedule: Type.Optional(Schedule),
-        model: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "null removes the override" })),
-        workspace: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "null removes the override" })),
+        // Not a union with null (some providers handle `anyOf` with null poorly): an empty string clears the override.
+        model: Type.Optional(Type.String({ description: "provider/model. An empty string removes the override (the default model is used)" })),
+        workspace: Type.Optional(Type.String({ description: "The folder the runs work in. An empty string removes the override (the default workspace is used)" })),
         ...Settings,
       }),
-      execute: guarded(async ({ job, ...patch }, api, context) => {
+      execute: guarded(async ({ job, ...given }, api, context) => {
+        const patch = { ...given, ...(given.model === "" ? { model: null } : {}), ...(given.workspace === "" ? { workspace: null } : {}) };
         const found = findJob(await jobs(), job);
         const preview = (await scheduler.request("PATCH", `${jobPath(found.id)}?dryRun=true`, patch)) as Preview;
         const { approved, said, questionId } = await confirm(`Change "${found.name}" like this?`, formatPreview(preview), api, context);

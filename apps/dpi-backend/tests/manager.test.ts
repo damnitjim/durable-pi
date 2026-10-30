@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { bootServer, faux, newToken, tempStore, until } from "./helpers.js";
 import type { Attention } from "../src/ask-user.js";
-import { CONFIRM_TIMEOUT_S, MANAGER_PROMPT } from "../src/manager.js";
+import { CONFIRM_TIMEOUT_S, createManager, MANAGER_PROMPT } from "../src/manager.js";
 
 type Seen = { method: string; path: string; body: any; auth: string | undefined; approval: string | undefined };
 
@@ -181,6 +181,27 @@ test("update_job and delete_job also wait for approval; the job is found by name
   } finally {
     await m.close();
   }
+});
+
+test("update_job clears a model or workspace override with an empty string", async () => {
+  const m = await setup();
+  try {
+    await m.enable();
+    const turn = await m.say('manage: update_job {"job":"Daily Digest","model":"","workspace":""}');
+    await until(async () => (await m.pending()) !== undefined, 15000, "the change question");
+    await m.answer((await m.pending())!.id, "Approve");
+    assert.match((await m.settle(turn)).answer!.text, /Updated "Daily Digest"/);
+    const sent = m.scheduler.seen.filter((r) => r.method === "PATCH");
+    assert.deepEqual(sent.map((r) => r.body), [{ model: null, workspace: null }, { model: null, workspace: null }], "the preview and the change both carry null");
+  } finally {
+    await m.close();
+  }
+});
+
+test("no Manager tool takes a null in its parameters: some providers handle anyOf with null poorly", () => {
+  const ext = createManager({ scheduler: { request: async () => ({}) } }) as unknown as { tools: { name: string; parameters: unknown }[] };
+  assert.ok(ext.tools.length > 10);
+  for (const tool of ext.tools) assert.doesNotMatch(JSON.stringify(tool.parameters), /"type":"null"/, `${tool.name} takes a null`);
 });
 
 test("run, stop and reset each wait for approval; the run lists and the question list need none", async () => {
