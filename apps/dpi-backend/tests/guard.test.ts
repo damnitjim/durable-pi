@@ -2,10 +2,10 @@
 // workspace, risky bash becomes an approval, trusted jobs skip the approval, and the guard file overrides the defaults.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Harness, createRegistry, type Conversation } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -15,7 +15,7 @@ import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { messageText } from "../../dpi-sdk/src/transcript.js";
 import { installFaux } from "../src/faux.js";
 import { AttentionDoc, answerQuestion, createAskUser, type Attention, type Question } from "../src/ask-user.js";
-import { createGuard } from "../src/guard.js";
+import { createGuard, defaultRisk, riskOf } from "../src/guard.js";
 import { faux, tempStore, until } from "./helpers.js";
 
 async function setup(opts: { trusted?: boolean } = {}) {
@@ -280,6 +280,165 @@ test("the built-in risk list covers the documented categories", async () => {
   }
 });
 
+// ------------------------------------------------------------------ hardening (#44)
+//
+// Decisions, gap by gap (see the header of src/guard.ts):
+//   a script the agent writes and then runs ........ accepted: the guard reads commands, it does not run or read scripts
+//   bash is not workspace-limited .................. fixed: a redirect or write-like command aimed outside is asked about
+//   dd of=, --opt=value targets .................... fixed: expanded like any other target
+//   a broad `allow` matching the whole command ..... fixed: an `allow` excuses only the part of the command it matches
+//   find / -delete, rsync --delete, mv x /dev/null . already or now covered (below)
+
+/** A workspace and a home outside the system's scratch folders, so /tmp can be told apart from "elsewhere". */
+function plainFolders() {
+  const base = realpathSync(mkdtempSync(join(resolve(import.meta.dirname, ".."), ".guard-test-")));
+  const workspace = join(base, "workspace");
+  const home = join(base, "home");
+  mkdirSync(workspace);
+  mkdirSync(home);
+  return { workspace, home, done: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+test("bash writing outside the workspace is asked about, in all the ways it can", () => {
+  const f = plainFolders();
+  try {
+    const asked = [
+      "echo x > /etc/foo",
+      "echo x >> ../elsewhere.txt",
+      "cp a /etc/b",
+      "cp -t /etc a",
+      "install --target-directory=/etc a",
+      "install a /usr/local/bin/x",
+      "echo x | tee /etc/y",
+      "sed -i s/a/b/ /etc/hosts",
+      "chmod 755 /usr/bin/x",
+      "truncate -s 0 /var/log/x",
+      "dd if=a of=/etc/x",
+      "dd if=a of=~/.zshrc",
+      "cp --target-directory=~/.config a",
+      "rsync -a --delete src/ /var/data/",
+      "echo x > $UNKNOWN/y",
+      "cd / && echo x > y",
+    ];
+    for (const command of asked) assert.ok(defaultRisk(command, f.workspace, f.home), `should ask: ${command}`);
+    assert.equal(defaultRisk("echo x > /etc/foo", f.workspace, f.home), "writes outside the workspace");
+    assert.equal(defaultRisk("dd if=a of=~/.zshrc", f.workspace, f.home), "writes a dotfile in the home folder", "the specific reason wins");
+  } finally {
+    f.done();
+  }
+});
+
+test("ordinary work inside the workspace, reads from anywhere, scratch space and the null device are not asked about", () => {
+  const f = plainFolders();
+  try {
+    const free = [
+      "ls",
+      "echo hi > out.txt",
+      "cat a > b/c",
+      "cp a b",
+      "cp /etc/hosts ./hosts",
+      "mv a b",
+      "echo x > /dev/null",
+      "ls 2>&1",
+      "ls > /dev/null 2>&1",
+      "echo x > /tmp/scratch.txt",
+      "echo x | tee /tmp/y",
+      "sed 's/a/b/' /etc/hosts",
+      "sed -i s/a/b/ file",
+      "chmod +x script.sh",
+      "find . -name x -delete",
+      "dd if=/dev/zero of=./blob bs=1 count=1",
+      "cat /etc/hosts",
+      "rsync -a src/ dest/",
+      "cd sub && echo x > y",
+      "npm test",
+    ];
+    for (const command of free) assert.equal(defaultRisk(command, f.workspace, f.home), undefined, `should not ask: ${command}`);
+  } finally {
+    f.done();
+  }
+});
+
+test("a workspace that lives in scratch space gets no scratch exemption: its neighbours are someone else's", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dpi-guard-scratch-")));
+  try {
+    const workspace = join(root, "workspace");
+    mkdirSync(workspace);
+    assert.ok(defaultRisk("echo x > ../neighbour.txt", workspace, root), "asked");
+    assert.equal(defaultRisk("echo x > out.txt", workspace, root), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("moving and deleting: a move takes its source away, /dev/null discards, find -delete and rsync --delete reach outside", () => {
+  const f = plainFolders();
+  try {
+    assert.equal(defaultRisk("mv x /dev/null", f.workspace, f.home), "discards a file (mv to /dev/null)");
+    assert.equal(defaultRisk("mv ~/important ./here", f.workspace, f.home), "deletes outside the workspace");
+    assert.equal(defaultRisk("mv ../outside/x ./here", f.workspace, f.home), "deletes outside the workspace");
+    assert.equal(defaultRisk("find / -delete", f.workspace, f.home), "deletes outside the workspace");
+    assert.ok(defaultRisk("rsync -a --delete src/ /elsewhere/", f.workspace, f.home));
+    assert.equal(defaultRisk("mv a b", f.workspace, f.home), undefined);
+    assert.equal(defaultRisk("rsync -a --delete src/ dest/", f.workspace, f.home), undefined, "inside the workspace");
+  } finally {
+    f.done();
+  }
+});
+
+test("rsync and scp to another machine are uploads", () => {
+  const f = plainFolders();
+  try {
+    for (const command of ["rsync -a src host:/dst", "rsync -a src user@host:dst", "scp a user@host:/x"])
+      assert.match(defaultRisk(command, f.workspace, f.home) ?? "", /uploads data/, command);
+    assert.equal(defaultRisk("rsync -a src/ dest/", f.workspace, f.home), undefined);
+  } finally {
+    f.done();
+  }
+});
+
+test("an `allow` pattern excuses the part of a command it matches, not the rest", () => {
+  const f = plainFolders();
+  try {
+    const rules = { allow: [/^git push/], ask: [] };
+    assert.equal(riskOf("git push", f.workspace, f.home, rules), undefined);
+    assert.equal(riskOf("git push origin main && git push --tags", f.workspace, f.home, rules), undefined, "every part is excused");
+    assert.match(riskOf("git push; sudo y", f.workspace, f.home, rules) ?? "", /sudo/);
+    assert.match(riskOf("git push | sudo y", f.workspace, f.home, rules) ?? "", /sudo/);
+    assert.match(riskOf("git push && rm -rf build", f.workspace, f.home, rules) ?? "", /rm -rf/);
+    assert.match(riskOf("echo ok > /etc/y; git push", f.workspace, f.home, rules) ?? "", /outside the workspace/);
+    // The excused part still counts for where later parts run.
+    assert.match(riskOf("cd / && git push && rm etc/hosts", f.workspace, f.home, { allow: [/^git push/, /^cd /], ask: [] }) ?? "", /deletes outside/);
+    // An `ask` pattern is still asked about, whatever allows it.
+    assert.match(riskOf("git push", f.workspace, f.home, { allow: [/git/], ask: [/push/] }) ?? "", /ask/);
+    // And an allow that is wrapped (`bash -c`) excuses that whole part.
+    assert.equal(riskOf("bash -c 'git push'", f.workspace, f.home, { allow: [/^bash -c/], ask: [] }), undefined);
+  } finally {
+    f.done();
+  }
+});
+
+test("a redirect outside the workspace becomes an approval, and runs only if approved (end to end)", async () => {
+  const t = await setup();
+  try {
+    const target = join(t.outside, "f.txt");
+    const turn = await t.say(`!echo hi > ${target}`);
+    const q = await t.nextQuestion();
+    assert.match(q.question, /writes outside the workspace/);
+    assert.equal(existsSync(target), false, "nothing is written while the approval waits");
+    await t.answer(q, "Deny");
+    await t.finished(turn);
+    assert.equal(existsSync(target), false, "denied: still nothing");
+
+    const again = await t.say(`!echo hi > ${target}`);
+    await t.answer(await t.nextQuestion(), "Approve");
+    await t.finished(again);
+    assert.equal(readFileSync(target, "utf8").trim(), "hi");
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // ------------------------------------------------------------------ trusted jobs
 
 test("a trusted job runs risky bash without asking", async () => {
@@ -309,9 +468,11 @@ test("`allow` patterns in the guard file quiet a default; `ask` patterns add new
     await t.finished(await t.say("!npm install --help"));
     assert.deepEqual(await t.questions(), [], "allowed commands run without asking");
 
-    // `allow` matches the whole command: a chained command is not waved through by a pattern for its first half.
-    const chained = await t.say("!git push origin main; echo ran > chained.txt");
-    await t.answer(await t.nextQuestion(), "Deny");
+    // `allow` excuses the part of the command it matches, not the rest: a chained risky command is still asked about.
+    const chained = await t.say("!git push origin main; sudo true; echo ran > chained.txt");
+    const risky = await t.nextQuestion();
+    assert.match(risky.question, /runs as another user/, "the sudo, not the excused push, is what is asked about");
+    await t.answer(risky, "Deny");
     await t.finished(chained);
     assert.equal(existsSync(join(t.workspace, "chained.txt")), false);
 

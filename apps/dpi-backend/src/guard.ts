@@ -6,13 +6,19 @@
 //                 the answer is "Approve". Trusted jobs skip the approval.
 //
 // The risk list is built in, and the global guard file overrides it: a command matching an `ask` pattern is always
-// asked about, one matching an `allow` pattern (and no `ask` pattern) never is. Patterns are regular expressions
-// tested against the whole command. Bash analysis is best effort; it reads the command, it doesn't run a shell.
+// asked about; an `allow` pattern excuses the part of a command (between `;`, `&&`, `|`, …) that it matches, never the
+// parts it does not, so `^git push` lets `git push` through but not `git push; sudo y`. Patterns are regular
+// expressions. Bash analysis is best effort; it reads the command, it doesn't run a shell.
+//
+// Known limits, accepted: a script the agent writes and then runs (`bash x.sh`, `python x.py`) is not read, and neither
+// is anything a variable or substitution hides. Within the workspace, bash is otherwise free; what it writes or moves
+// outside it (a redirect, `cp`, `mv`, `tee`, `dd of=` …) is asked about, with scratch space (`/tmp`) and `/dev/null`
+// left alone.
 //
 // The checks are tool wraps, not `beforeTool` hooks: a hook has no agent (so no workspace) and can't commit (so can't
 // ask), and a wrap also covers calls tools make through `executeTool()`.
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { defineExtension, wrapTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
@@ -80,6 +86,38 @@ function withinWorkspace(workspace: string, raw: string, home: string, from = wo
   }
 }
 
+/**
+ * Places a command may write to without asking: the null device, and the system's scratch folders (`/tmp` and the like)
+ * unless the workspace itself lives in one, where "elsewhere in scratch" is just as much someone else's folder.
+ */
+function harmlessSink(path: string, workspace: string): boolean {
+  if (["/dev/null", "/dev/stdout", "/dev/stderr"].includes(path)) return true;
+  const scratch = new Set(["/tmp", "/private/tmp", tmpdir()]);
+  for (const dir of [...scratch]) {
+    try {
+      scratch.add(realpathSync(dir));
+    } catch {
+      // A missing scratch folder is simply not one.
+    }
+  }
+  try {
+    const real = realpathSync(workspace);
+    if ([...scratch].some((dir) => inside(dir, real))) return false;
+    const target = realish(path);
+    return [...scratch].some((dir) => inside(dir, target));
+  } catch {
+    return false;
+  }
+}
+
+/** Whether writing to `raw` (as written in a call run from `cwd`) leaves the workspace for somewhere that matters. */
+function writesOutside(workspace: string, raw: string, home: string, cwd: string): boolean {
+  const expanded = expandPath(raw, home);
+  if (expanded === undefined) return true; // leans on a variable or substitution we can't see through
+  if (withinWorkspace(workspace, raw, home, cwd)) return false;
+  return !harmlessSink(resolve(cwd, expanded), workspace);
+}
+
 // ------------------------------------------------------------------ the built-in risk list
 
 const SHELL_SPLIT = /&&|\|\||[;|&\n()`]|\$\(/;
@@ -137,31 +175,50 @@ const INSTALLERS: Record<string, string[]> = {
 const WRITERS = new Set(["tee", "cp", "mv", "ln", "install", "touch", "sed", "perl", "chmod", "chown", "dd", "rsync", "truncate"]);
 const DELETERS = new Set(["rm", "rmdir", "unlink", "shred"]);
 
+/** The files a writing command (`cp`, `tee`, `dd of=` …) writes to, as written. Nothing for a command that only reads. */
+function writeTargets(word: string, args: string[]): string[] {
+  if (!WRITERS.has(word)) return [];
+  const operands = args.filter((a) => !a.startsWith("-"));
+  // `--output=~/.x`-style option values are targets too.
+  const optionValues = args.filter((a) => a.startsWith("--") && a.includes("=")).map((a) => a.slice(a.indexOf("=") + 1)).filter((v) => /^(\/|~|\$HOME|\.\.?\/)/.test(v));
+  if (word === "dd") return [...args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3)), ...optionValues];
+  if (word === "sed" || word === "perl") return hasShort(args, "i") || hasLong(args, "--in-place") ? [...operands, ...optionValues] : [];
+  if (word === "chmod" || word === "chown") return [...operands.slice(1), ...optionValues]; // the first operand is the mode or owner
+  if (["cp", "mv", "ln", "install", "rsync"].includes(word)) {
+    // The destination is the last operand, or the directory given with -t / --target-directory.
+    const at = args.findIndex((a) => a === "-t" || a === "--target-directory");
+    const directory = at >= 0 ? [args[at + 1]].filter(Boolean) : [];
+    return [...(directory.length ? directory : operands.slice(-1)), ...optionValues];
+  }
+  return [...operands, ...optionValues]; // tee, touch, truncate
+}
+
 /** Why a command needs approval, or undefined if it doesn't. */
-export function defaultRisk(command: string, startCwd: string, home: string): string | undefined {
+export function defaultRisk(command: string, startCwd: string, home: string, allowed?: (segment: string) => boolean): string | undefined {
   let cwd = startCwd;
   for (const { word, args, text } of segments(command)) {
-    // `bash -c "…"`, `eval …` and `find -exec …` run more commands; read them as if they were written here.
-    if (SHELLS.has(word) && args.includes("-c")) {
-      const inner = defaultRisk(args.slice(args.indexOf("-c") + 1).join(" "), cwd, home);
-      if (inner) return inner;
-    }
-    if (word === "eval") {
-      const inner = defaultRisk(args.join(" "), cwd, home);
-      if (inner) return inner;
-    }
-    if (word === "find" && args.some((a) => a === "-exec" || a === "-execdir" || a === "-delete")) {
-      const at = args.findIndex((a) => a === "-exec" || a === "-execdir");
-      const inner = at >= 0 ? defaultRisk(args.slice(at + 1).join(" "), cwd, home) : undefined;
-      if (inner) return inner;
-      if (args.includes("-delete") && !withinWorkspace(startCwd, args.find((a) => !a.startsWith("-")) ?? ".", home, cwd))
-        return "deletes outside the workspace";
-    }
     // Later segments of `cd X && …` run from X.
     if (word === "cd" && args[0]) {
       const target = expandPath(args[0], home);
       cwd = target === undefined ? "/" : resolve(cwd, target);
       continue;
+    }
+    if (allowed?.(text)) continue; // an `allow` pattern for this part of the command, and only this part
+    // `bash -c "…"`, `eval …` and `find -exec …` run more commands; read them as if they were written here.
+    if (SHELLS.has(word) && args.includes("-c")) {
+      const inner = defaultRisk(args.slice(args.indexOf("-c") + 1).join(" "), cwd, home, allowed);
+      if (inner) return inner;
+    }
+    if (word === "eval") {
+      const inner = defaultRisk(args.join(" "), cwd, home, allowed);
+      if (inner) return inner;
+    }
+    if (word === "find" && args.some((a) => a === "-exec" || a === "-execdir" || a === "-delete")) {
+      const at = args.findIndex((a) => a === "-exec" || a === "-execdir");
+      const inner = at >= 0 ? defaultRisk(args.slice(at + 1).join(" "), cwd, home, allowed) : undefined;
+      if (inner) return inner;
+      if (args.includes("-delete") && !withinWorkspace(startCwd, args.find((a) => !a.startsWith("-")) ?? ".", home, cwd))
+        return "deletes outside the workspace";
     }
     if (word === "sudo" || word === "doas" || word === "su") return "runs as another user (sudo)";
     if (word === "launchctl") return "changes launchd services (launchctl)";
@@ -210,19 +267,26 @@ export function defaultRisk(command: string, startCwd: string, home: string): st
       if (!hasLong(args, "--method") || args.some((a) => /^--method=(?!GET$|HEAD$)/i.test(a))) return "uploads data (wget)";
     }
 
-    // Writes into a dotfile directly under the home directory (`~/.zshrc`, `~/.ssh/...`).
-    const redirects = [...text.matchAll(/>>?\s*(\S+)/g)].map((m) => unquote(m[1]));
-    const writes = redirects.length > 0 || WRITERS.has(word);
-    if (writes) {
-      const candidates = [...redirects, ...(WRITERS.has(word) ? args.filter((a) => !a.startsWith("-")) : [])];
-      for (const raw of candidates) {
-        const expanded = expandPath(raw, home);
-        if (expanded === undefined) continue;
-        const target = resolve(cwd, expanded);
-        if (target !== home && inside(home, target) && relative(home, target).split("/")[0].startsWith("."))
-          return "writes a dotfile in the home folder";
-      }
+    // What this part of the command writes: redirects, and the destinations of the commands that write files.
+    const redirects = [...text.matchAll(/>>?\s*(\S+)/g)].map((m) => unquote(m[1])).filter((target) => !target.startsWith("&"));
+    const targets = [...redirects, ...writeTargets(word, args)];
+    if (word === "mv") {
+      // Moving takes the source away; a source outside the workspace is a deletion there, and /dev/null is a discard.
+      const [destination, ...sources] = [...args.filter((a) => !a.startsWith("-"))].reverse();
+      if (destination === "/dev/null") return "discards a file (mv to /dev/null)";
+      if (sources.some((src) => !withinWorkspace(startCwd, src, home, cwd))) return "deletes outside the workspace";
     }
+    if ((word === "rsync" || word === "scp") && args.some((a) => !a.startsWith("-") && /^[^/.~$][^/]*:/.test(a))) return `uploads data (${word})`;
+    // Writes into a dotfile directly under the home directory (`~/.zshrc`, `~/.ssh/...`) are named as such.
+    for (const raw of targets) {
+      const expanded = expandPath(raw, home);
+      if (expanded === undefined) continue;
+      const target = resolve(cwd, expanded);
+      if (target !== home && inside(home, target) && relative(home, target).split("/")[0].startsWith("."))
+        return "writes a dotfile in the home folder";
+    }
+    // bash is not workspace-limited the way write and edit are, but what it writes elsewhere is asked about.
+    if (targets.some((raw) => writesOutside(startCwd, raw, home, cwd))) return "writes outside the workspace";
   }
   return undefined;
 }
@@ -230,8 +294,7 @@ export function defaultRisk(command: string, startCwd: string, home: string): st
 /** Why `command` needs approval under the guard file and the built-in list, or undefined if it can just run. */
 export function riskOf(command: string, cwd: string, home: string, rules: GuardRules): string | undefined {
   if (rules.ask.some((p) => p.test(command))) return "matches an `ask` pattern in guard.json";
-  if (rules.allow.some((p) => p.test(command))) return undefined;
-  return defaultRisk(command, cwd, home);
+  return defaultRisk(command, cwd, home, rules.allow.length ? (segment) => rules.allow.some((p) => p.test(segment)) : undefined);
 }
 
 // ------------------------------------------------------------------ the extension

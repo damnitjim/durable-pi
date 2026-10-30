@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import type { Store } from "../src/store.js";
+import { Store } from "../src/store.js";
+import { ApiFault } from "../src/errors.js";
+import { CredentialCommandError } from "../src/pi-models.js";
 import { JOB_RUNS_DOC, type JobRunsDoc } from "../../dpi-sdk/src/jobs.js";
 import { faux, tempStore, until } from "./helpers.js";
 
@@ -258,4 +260,21 @@ test("read only: the agent is offered only tools that read; turning it off resto
     await store.close();
     await t.cleanup();
   }
+});
+
+test("a model whose key command fails is a server error (500), while an unknown model stays a 400", async () => {
+  // validateModel only reads this.options, so it can be tried without opening a real store.
+  const withPi = (resolve: () => Promise<never>) => ({ options: { provider: "real", pi: { resolve } } });
+  const validate = (self: object, model: unknown) => (Store.prototype.validateModel as (this: object, m: unknown) => Promise<unknown>).call(self, model);
+  const m = { provider: "locked-vault", modelId: "M" };
+
+  const broken = withPi(async () => {
+    throw new CredentialCommandError("Could not get an API key for locked-vault: `exit 3` failed");
+  });
+  await assert.rejects(() => validate(broken, m), (e: unknown) => e instanceof ApiFault && e.status === 500 && /locked-vault/.test(e.message));
+
+  const unknown = withPi(async () => {
+    throw new Error("Unknown model locked-vault/M");
+  });
+  await assert.rejects(() => validate(unknown, m), (e: unknown) => e instanceof ApiFault && e.status === 400);
 });

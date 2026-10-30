@@ -56,6 +56,12 @@ function commandRunner() {
 }
 type Run = ReturnType<typeof commandRunner>;
 
+/**
+ * A key could not be had: a `!command` in auth.json or models.json failed, or printed nothing (a locked keychain, a
+ * missing tool). That is the Backend's own setup being broken, not a mistake in the request that asked for the model.
+ */
+export class CredentialCommandError extends Error {}
+
 async function resolveValue(raw: string, env: NodeJS.ProcessEnv, run: Run): Promise<string | undefined> {
   if (raw.startsWith("!")) return run(raw.slice(1));
   const name = /^\$\{(\w+)\}$|^\$(\w+)$/.exec(raw);
@@ -212,7 +218,7 @@ export async function loadPiModels(
     try {
       auth = await models.getAuth(ref.provider);
     } catch (e) {
-      throw new Error(`Could not get an API key for ${ref.provider}: ${(e as Error).message}`);
+      throw new CredentialCommandError(`Could not get an API key for ${ref.provider}: ${(e as Error).message}`);
     }
     if (!auth && stored[ref.provider]?.type === "oauth") throw new Error(oauthRefusal(ref.provider));
     if (!auth) throw new Error(`There is no API key for ${ref.provider}: add one in pi's auth.json or set its environment variable.`);
