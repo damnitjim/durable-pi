@@ -312,6 +312,16 @@ export function createManager(options: { scheduler?: SchedulerApi } = {}) {
       }),
     }),
     defineTool({
+      name: "telegram_status",
+      description: "Say whether the user's Telegram bot is paired, and to which account. Read-only: pairing can only be changed by the user, outside the Manager.",
+      parameters: Type.Object({}),
+      replay: "safe",
+      execute: guarded(async () => {
+        const state = (await scheduler.request("GET", "/telegram/pairing")) as { paired: boolean; userId?: number };
+        return text(state.paired ? `Telegram is paired${state.userId !== undefined ? ` to account ${state.userId}` : ""}.` : "Telegram is not paired yet. The user pairs it themselves with the code in the Scheduler's log.", { telegram: state });
+      }),
+    }),
+    defineTool({
       name: "answer_question",
       description: "Answer a question an agent is waiting on (see list_questions). The user sees the question and your answer and must approve; an approval is the user's decision, never yours.",
       parameters: Type.Object({
