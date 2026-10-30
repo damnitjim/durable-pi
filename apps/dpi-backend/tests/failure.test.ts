@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { WireEntry } from "../../dpi-sdk/src/api.js";
-import { lastFailure } from "../../dpi-sdk/src/transcript.js";
+import { lastFailure, turnAccount } from "../../dpi-sdk/src/transcript.js";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const user = (id: number): WireEntry => ({ id, conversationId: 1, kind: "pi.user", model: [{ role: "user", content: "go" }] });
@@ -27,4 +27,12 @@ test("lastFailure is undefined when the last turn succeeded, even after an earli
   assert.equal(lastFailure([user(1), assistant(2, [], "error", "boom"), user(3), assistant(4, [], "stop")]), undefined);
   assert.equal(lastFailure([user(1), assistant(2, [], "error", "boom"), user(3)]), undefined, "a newer input is not yet answered");
   assert.equal(lastFailure([]), undefined);
+});
+
+test("turnAccount reads the named turn only, so a follow-up queued behind it does not change the account", () => {
+  const entries = [user(1), assistant(2, [call("bash", { command: "ls" })], "toolUse"), assistant(3, [], "error", "429 rate limited"), user(4), assistant(5, [call("read", {})], "toolUse"), assistant(6, [], "stop")];
+  assert.deepEqual(turnAccount(entries, 1), { error: "429 rate limited", lastAction: 'bash {"command":"ls"}' });
+  assert.deepEqual(turnAccount(entries, 4), { lastAction: "read {}" }, "the later turn succeeded: no error");
+  assert.deepEqual(turnAccount(entries, 99), {}, "an unknown entry says nothing");
+  assert.deepEqual(turnAccount([user(1)], 1), {}, "a turn with no reply says nothing");
 });

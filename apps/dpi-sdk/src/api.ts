@@ -232,7 +232,7 @@ export interface SendMessageBody {
 export type SendResult =
   | { submissionId: number; status: "queued" | "pending" }
   | { submissionId: number; status: "done"; answer: { entryId: number; text: string } }
-  | { submissionId: number; status: "unanswered"; reason: string };
+  | { submissionId: number; status: "unanswered"; reason: string; account?: { error?: string; lastAction?: string } };
 
 export interface ForkBody {
   entryId: number;
