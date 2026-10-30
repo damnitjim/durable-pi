@@ -91,6 +91,7 @@ const Schedule = Type.Union(
 );
 const Settings = {
   sessionPolicy: Type.Optional(Type.Union([Type.Literal("fresh"), Type.Literal("continuing")], { description: "fresh (default): every run starts a new session. continuing: every run shares one session." })),
+  maxRunMs: Type.Optional(Type.Number({ description: "How long one run may go on before the Scheduler aborts it and records it as failed, in ms (default 2 hours, at least a minute). Raise it for a job that legitimately works for hours." })),
   catchUpWindowMs: Type.Optional(Type.Number({ description: "How late a recurring job's latest missed run may still start, in ms (default 2 hours)" })),
   notifyMode: Type.Optional(Type.Union([Type.Literal("always"), Type.Literal("when-needed"), Type.Literal("never")], { description: "When a finished run messages the user (default always). Failures and questions always do." })),
   trusted: Type.Optional(Type.Boolean({ description: "Let the job's runs make risky tool calls without asking first (default false). Only when the user asks for it." })),

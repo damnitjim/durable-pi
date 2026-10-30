@@ -18,6 +18,7 @@ export function formatPreview(job: Preview): string {
     `Notify: ${job.notifyMode}`,
     `Trusted: ${job.trusted ? "YES, risky tool calls will not ask first" : "no"}`,
     `Catch-up window: ${Math.round(job.catchUpWindowMs / 60_000)} min`,
+    `Longest run: ${Math.round(job.maxRunMs / 60_000)} min`,
   ].join("\n");
 }
 

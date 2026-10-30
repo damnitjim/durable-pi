@@ -13,7 +13,7 @@ type Seen = { method: string; path: string; body: any; auth: string | undefined;
 async function stubScheduler() {
   const seen: Seen[] = [];
   const jobs: any[] = [
-    { id: "j1", name: "Daily Digest", prompt: "Summarise", schedule: { kind: "cron", expr: "0 7 * * *", timezone: "America/Chicago" }, status: "active", nextFireAt: Date.parse("2026-10-30T12:00:00Z"), sessionPolicy: "fresh", model: null, workspace: null, notifyMode: "always", trusted: false, catchUpWindowMs: 7_200_000 },
+    { id: "j1", name: "Daily Digest", prompt: "Summarise", schedule: { kind: "cron", expr: "0 7 * * *", timezone: "America/Chicago" }, status: "active", nextFireAt: Date.parse("2026-10-30T12:00:00Z"), sessionPolicy: "fresh", model: null, workspace: null, notifyMode: "always", trusted: false, catchUpWindowMs: 7_200_000, maxRunMs: 7_200_000 },
   ];
   const questions = [
     { id: "s9/q1", questionId: "q1", jobId: "j1", question: "Deploy it?", choices: ["Approve", "Deny"], askedAt: 1, timeoutAt: 2 },
@@ -33,7 +33,7 @@ async function stubScheduler() {
     const preview = (job: any) => ({ ...job, nextFireTimes: ["2026-10-29T22:00:00.000Z"] });
     if (req.method === "GET" && url.pathname === "/jobs") return send(200, jobs);
     if (req.method === "POST" && url.pathname === "/jobs") {
-      const job = { id: "j2", status: "active", nextFireAt: 1, sessionPolicy: "fresh", model: null, workspace: null, notifyMode: "always", trusted: false, catchUpWindowMs: 7_200_000, ...record.body, schedule: record.body.schedule };
+      const job = { id: "j2", status: "active", nextFireAt: 1, sessionPolicy: "fresh", model: null, workspace: null, notifyMode: "always", trusted: false, catchUpWindowMs: 7_200_000, maxRunMs: 7_200_000, ...record.body, schedule: record.body.schedule };
       if (url.searchParams.get("dryRun") !== "true") jobs.push(job);
       return send(url.searchParams.get("dryRun") === "true" ? 200 : 201, preview(job));
     }

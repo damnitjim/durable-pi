@@ -16,6 +16,7 @@ const job = (id: string, name: string): Job => ({
   notifyMode: "always",
   trusted: false,
   catchUpWindowMs: 7_200_000,
+  maxRunMs: 7_200_000,
 });
 
 test("findJob matches an id, then the exact name, then the name with spaces squeezed, then in any case", () => {
@@ -39,5 +40,5 @@ test("formatPreview shows everything the user is agreeing to", () => {
   const text = formatPreview({ ...job("a1", "Digest"), trusted: true, nextFireTimes: ["2026-10-30T13:00:00Z"] } as Preview);
   assert.match(text, /^Name: Digest\nSchedule: cron "0 8 \* \* \*" \(America\/Chicago\)\nNext runs: 2026-10-30T13:00:00Z\n/);
   assert.match(text, /Trusted: YES/);
-  assert.match(text, /Catch-up window: 120 min$/);
+  assert.match(text, /Catch-up window: 120 min\nLongest run: 120 min$/);
 });
