@@ -48,8 +48,9 @@ export interface ModelInfo {
   id: string;
   provider: string;
   name: string;
-  tier: string;
-  icon: string;
+  /** Display hints some Backends give; the Backend that reuses pi's setup has none. */
+  tier?: string;
+  icon?: string;
   contextWindow: number;
   reasoning: boolean;
   cost: { input: number; output: number };

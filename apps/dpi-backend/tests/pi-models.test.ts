@@ -206,17 +206,139 @@ test("an OAuth login is ignored when a key is available for the same provider, a
   }
 });
 
-test("a models.json provider named like a built-in one is refused", async () => {
+/** A server that answers any chat completion with `reply`, and remembers the headers of the request. */
+async function chatServer(reply: string) {
+  const seen: { authorization?: string; custom?: string; url?: string; model?: string }[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ authorization: req.headers.authorization, custom: req.headers["x-gateway"] as string | undefined, url: req.url, model: JSON.parse(body || "{}").model });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (delta: object, finish: string | null = null) =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.write(chunk({ role: "assistant", content: reply }));
+      res.write(chunk({}, "stop"));
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { seen, base: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, close: () => server.close() };
+}
+const ask = (pi: Awaited<ReturnType<typeof loadPiModels>>, provider: string, id: string) =>
+  pi.models.completeSimple(pi.models.getModel(provider, id)!, { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
+
+test("a models.json entry named like a built-in provider changes that provider: a baseUrl moves its models, extra models are added", async () => {
+  const plain = await agentDir({ settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" }, auth: { openai: { type: "api_key", key: "k" } } });
+  const builtinCount = (await loadPiModels({ agentDir: plain.dir, env: noEnv })).models.getModels("openai").length;
+  await plain.cleanup();
   const t = await agentDir({
     settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" },
-    auth: { openai: { type: "api_key", key: "k" } },
-    models: { providers: { openai: { baseUrl: "http://x/v1", api: "openai-completions", models: [{ id: "m" }] } } },
+    auth: { openai: { type: "api_key", key: "sk-from-auth-json" } },
+    models: {
+      providers: {
+        openai: {
+          baseUrl: "http://gateway.test/v1",
+          headers: { "x-gateway": "yes" },
+          models: [{ id: "my-finetune", name: "My fine-tune", api: "openai-completions", contextWindow: 64000 }],
+        },
+      },
+    },
   });
   try {
-    await assert.rejects(() => loadPiModels({ agentDir: t.dir, env: noEnv }), /"openai" is a built-in provider/);
+    const pi = await loadPiModels({ agentDir: t.dir, env: noEnv });
+    const extra = pi.models.getModel("openai", "my-finetune")!;
+    assert.equal(extra.name, "My fine-tune");
+    assert.equal(extra.baseUrl, "http://gateway.test/v1");
+    assert.equal(extra.contextWindow, 64000);
+    // The built-in models are all still there, now sent through the gateway.
+    const luna = pi.models.getModel("openai", "gpt-5.6-luna")!;
+    assert.equal(luna.baseUrl, "http://gateway.test/v1");
+    assert.deepEqual((luna as { headers?: object }).headers, { "x-gateway": "yes" });
+    assert.equal(pi.models.getModels("openai").length, builtinCount + 1);
+    // The credential is still pi's.
+    assert.equal(await apiKeyOf(pi, "openai"), "sk-from-auth-json");
+    assert.deepEqual(pi.defaultModel, { provider: "openai", modelId: "gpt-5.6-luna" });
+    // And the Backend's own checks accept the new model.
+    assert.deepEqual(await pi.resolve("openai/my-finetune"), { provider: "openai", modelId: "my-finetune" });
   } finally {
     await t.cleanup();
   }
+});
+
+test("a request for a model of a merged built-in provider goes to the overridden endpoint with pi's key and the extra headers", async () => {
+  const server = await chatServer("hello from the gateway");
+  const t = await agentDir({
+    settings: { defaultProvider: "openai", defaultModel: "my-finetune" },
+    auth: { openai: { type: "api_key", key: "sk-from-auth-json" } },
+    models: { providers: { openai: { baseUrl: server.base, headers: { "x-gateway": "yes" }, models: [{ id: "my-finetune", api: "openai-completions" }] } } },
+  });
+  try {
+    const pi = await loadPiModels({ agentDir: t.dir, env: noEnv });
+    const answer = await ask(pi, "openai", "my-finetune");
+    assert.match(JSON.stringify(answer.content), /hello from the gateway/);
+    assert.equal(server.seen[0]?.authorization, "Bearer sk-from-auth-json");
+    assert.equal(server.seen[0]?.custom, "yes");
+    assert.equal(server.seen[0]?.model, "my-finetune");
+  } finally {
+    server.close();
+    await t.cleanup();
+  }
+});
+
+test("a models.json apiKey for a built-in provider is used only when auth.json has none", async () => {
+  for (const [auth, expected] of [[undefined, "key-from-models-json"], [{ openai: { type: "api_key", key: "key-from-auth-json" } }, "key-from-auth-json"]] as const) {
+    const t = await agentDir({
+      settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" },
+      ...(auth ? { auth } : {}),
+      models: { providers: { openai: { apiKey: "$GATEWAY_KEY" } } },
+    });
+    try {
+      const pi = await loadPiModels({ agentDir: t.dir, env: { GATEWAY_KEY: "key-from-models-json" } as NodeJS.ProcessEnv });
+      assert.equal(await apiKeyOf(pi, "openai"), expected);
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
+test("a merged entry that adds a model without an api, or uses one the Backend can't speak, is refused with the provider named", async () => {
+  const base = { settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna" }, auth: { openai: { type: "api_key", key: "k" } } };
+  const noApi = await agentDir({ ...base, models: { providers: { openai: { baseUrl: "http://x/v1", models: [{ id: "m" }] } } } });
+  const badApi = await agentDir({ ...base, models: { providers: { openai: { api: "carrier-pigeon", models: [{ id: "m" }] } } } });
+  try {
+    await assert.rejects(() => loadPiModels({ agentDir: noApi.dir, env: noEnv }), /provider "openai" model "m" needs an api/);
+    await assert.rejects(() => loadPiModels({ agentDir: badApi.dir, env: noEnv }), /provider "openai" uses api "carrier-pigeon"/);
+  } finally {
+    await noApi.cleanup();
+    await badApi.cleanup();
+  }
+});
+test("enabledModels in pi's settings limits what the model list shows, with * as a wildcard, and never the default", async () => {
+  const make = async (enabledModels?: unknown) => {
+    const t = await agentDir({
+      settings: { defaultProvider: "openai", defaultModel: "gpt-5.6-luna", ...(enabledModels !== undefined ? { enabledModels } : {}) },
+      auth: { openai: { type: "api_key", key: "k" } },
+    });
+    const pi = await loadPiModels({ agentDir: t.dir, env: noEnv });
+    await t.cleanup();
+    return pi;
+  };
+  const ref = (provider: string, modelId: string) => ({ provider, modelId });
+
+  const everything = await make();
+  assert.equal(everything.isEnabled(ref("anthropic", "claude-x")), true, "no setting: every model");
+  assert.equal((await make([])).isEnabled(ref("anthropic", "claude-x")), true, "an empty list is no setting");
+
+  const some = await make(["anthropic/claude-*", "openai/gpt-5.6-luna", "local.box/m+1"]);
+  assert.equal(some.isEnabled(ref("anthropic", "claude-sonnet")), true, "a wildcard");
+  assert.equal(some.isEnabled(ref("anthropic", "other")), false);
+  assert.equal(some.isEnabled(ref("openai", "gpt-4o")), false);
+  assert.equal(some.isEnabled(ref("local.box", "m+1")), true, "regex characters in a pattern are literal");
+  assert.equal(some.isEnabled(ref("localXbox", "m+1")), false);
+  const onlyOthers = await make(["anthropic/*"]);
+  assert.equal(onlyOthers.isEnabled(ref("openai", "gpt-5.6-luna")), true, "the default model is always listed");
+  assert.equal((await make("not a list")).isEnabled(ref("anthropic", "claude-x")), true, "a malformed setting is ignored");
 });
 
 test("a credential in auth.json beats the apiKey in models.json", async () => {

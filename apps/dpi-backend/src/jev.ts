@@ -9,17 +9,23 @@ export type JevAnswer =
 
 const RETRY = new Set([429, 502, 503, 529]);
 
+/**
+ * `openRouterKey` is where pi keeps its OpenRouter credential (auth.json, or pi's own environment lookup); the
+ * `OPENROUTER_API_KEY` variable is the fallback when there is no pi to ask. `TYPESAFE_API_KEY` goes to TypeSafe directly.
+ */
 export async function askJev(
   state: unknown,
   questions: Record<string, JevQuestion>,
   signal?: AbortSignal,
+  openRouterKey?: () => Promise<string | undefined>,
 ): Promise<Record<string, JevAnswer>> {
+  const piKey = process.env.TYPESAFE_API_KEY ? undefined : await openRouterKey?.().catch(() => undefined);
   const [endpoint, key, model] = process.env.TYPESAFE_API_KEY
     ? ["https://api.typesafe.ai/v1/systemone", process.env.TYPESAFE_API_KEY, "jev-latest"]
-    : process.env.OPENROUTER_API_KEY
-      ? ["https://openrouter.ai/api/alpha/decisions", process.env.OPENROUTER_API_KEY, "~typesafe/jev-latest"]
+    : (piKey ?? process.env.OPENROUTER_API_KEY)
+      ? ["https://openrouter.ai/api/alpha/decisions", (piKey ?? process.env.OPENROUTER_API_KEY)!, "~typesafe/jev-latest"]
       : [];
-  if (!endpoint) throw Error("Jev needs TYPESAFE_API_KEY or OPENROUTER_API_KEY");
+  if (!endpoint) throw Error("Jev needs TYPESAFE_API_KEY, or an OpenRouter key in pi's auth.json (or OPENROUTER_API_KEY)");
   const body = JSON.stringify({ model, state, questions });
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(endpoint, {

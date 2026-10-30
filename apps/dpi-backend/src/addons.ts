@@ -104,7 +104,7 @@ export const ADDON_INFO: Omit<HarnessExtensionInfo, "enabled" | "prompts">[] = [
   },
 ];
 
-export function createAddons(opts: { offline: boolean; scheduler?: SchedulerApi }) {
+export function createAddons(opts: { offline: boolean; scheduler?: SchedulerApi; openRouterKey?: () => Promise<string | undefined> }) {
   const prompts = defineExtension({
     name: "system-prompts",
     sections: [
@@ -120,7 +120,7 @@ export function createAddons(opts: { offline: boolean; scheduler?: SchedulerApi 
       ),
     ],
   });
-  const judge = opts.offline ? judgeOffline : async (command: string) => gate(await askJev({ command }, BASH_QUESTIONS));
+  const judge = opts.offline ? judgeOffline : async (command: string) => gate(await askJev({ command }, BASH_QUESTIONS, undefined, opts.openRouterKey));
   const jev = defineExtension({
     name: "jev-damage-control",
     hooks: [

@@ -36,7 +36,7 @@ test("validation rejects bad kinds, missing fields and bad ids; exe-dev derives 
   assert.throws(() => parseNetworkConfig("devices:\n  a:\n    kind: local\n    roots: ['~']"), /renamed to "start_dirs"/);
   // host defaults by kind; env merges defaults and device and refuses managed or duplicate keys.
   const e = parseNetworkConfig(
-    "defaults:\n  env_keys: [OPENROUTER_API_KEY]\n  env: { DPI_PROVIDER: openrouter, LOG_LEVEL: info }\ndevices:\n  a:\n    kind: local\n    env: { DPI_PROVIDER: faux }\n  b:\n    kind: url\n    url: http://b\n    host: 10.0.0.5",
+    "defaults:\n  env_keys: [OPENROUTER_API_KEY]\n  env: { DPI_PROVIDER: pi, LOG_LEVEL: info }\ndevices:\n  a:\n    kind: local\n    env: { DPI_PROVIDER: faux }\n  b:\n    kind: url\n    url: http://b\n    host: 10.0.0.5",
   );
   assert.equal(e.devices.a.host, "127.0.0.1");
   assert.equal(e.devices.b.host, "10.0.0.5");

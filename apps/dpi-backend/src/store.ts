@@ -278,19 +278,17 @@ export class Store {
         id: m.id,
         provider: "faux",
         name: m.name,
-        tier: "T",
-        icon: "lab.png",
         contextWindow: 128000,
         reasoning: false,
         cost: { input: 0, output: 0 },
       }));
-    const available = await this.models.getAvailable(undefined, { signal: AbortSignal.timeout(10000) });
+    const available = (await this.models.getAvailable(undefined, { signal: AbortSignal.timeout(10000) })).filter((m) =>
+      this.options.pi!.isEnabled({ provider: m.provider, modelId: m.id }),
+    );
     return available.map((m) => ({
       id: m.id,
       provider: m.provider,
       name: m.name,
-      tier: "pi",
-      icon: "lab.png",
       contextWindow: m.contextWindow,
       reasoning: m.reasoning,
       cost: { input: m.cost.input, output: m.cost.output },
@@ -520,7 +518,12 @@ export class Store {
       const guard = createGuard({ guardFile: this.options.guardFile });
       registry.install(guard);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
-      const addons = createAddons({ offline: this.options.provider === "faux" });
+      const pi = this.options.pi;
+      const addons = createAddons({
+        offline: this.options.provider === "faux",
+        // Jev's OpenRouter key is pi's: auth.json first, then the environment variable pi itself reads.
+        ...(pi ? { openRouterKey: async () => (await pi.models.getAuth("openrouter"))?.auth.apiKey } : {}),
+      });
       for (const extension of addons.list) registry.install(extension);
       const harness = await Harness.open(
         await openNodeSqliteStorage(row.dbPath),
