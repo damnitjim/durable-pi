@@ -137,6 +137,38 @@ test("ask_user stores the question, waits, and hands the answer back to the agen
   }
 });
 
+test("ask_user keeps the evidence the agent gives in context, and a question without it has none", async () => {
+  const t = await setup();
+  try {
+    await t.say("ask: Roll back? | yes | no | context=error rate 4.8% since 07:29, limit 1%");
+    const q = await t.question();
+    assert.equal(q.question, "Roll back?");
+    assert.deepEqual(q.choices, ["yes", "no"]);
+    assert.equal(q.context, "error rate 4.8% since 07:29, limit 1%");
+  } finally {
+    await t.cleanup();
+  }
+  const plainAsk = await setup();
+  try {
+    await plainAsk.say("ask: Proceed?");
+    assert.equal("context" in (await plainAsk.question()), false);
+  } finally {
+    await plainAsk.cleanup();
+  }
+});
+
+test("context over 4000 characters is refused, and no question is asked", async () => {
+  const t = await setup();
+  try {
+    const turn = await t.say(`ask: Roll back? | context=${"x".repeat(4001)}`);
+    await until(async () => (await t.reply(turn)) !== undefined, 10000, "the turn to end");
+    assert.match((await t.reply(turn))!, /context must be at most 4000 characters/);
+    assert.deepEqual((await t.doc()).questions, {});
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("a free-text answer works even when there are choices", async () => {
   const t = await setup();
   try {

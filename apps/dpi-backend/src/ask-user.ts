@@ -14,6 +14,8 @@ const HOUR_MS = 3_600_000;
 export const DEFAULT_TIMEOUT_MS = 12 * HOUR_MS;
 export const REMINDER_MS = HOUR_MS;
 export const NO_ANSWER = "No answer: denied";
+/** The most evidence a question may carry. Whoever shows it cuts it shorter. */
+export const CONTEXT_MAX = 4000;
 /** How often the tool call looks for an answer. Reads only. */
 const WATCH_MS = 500;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,6 +26,8 @@ export type Question = {
   taskId: number;
   question: string;
   choices?: string[];
+  /** The evidence behind the question, in the agent's words, when it gave any. */
+  context?: string;
   askedAt: number;
   timeoutAt: number;
   remindedAt?: number;
@@ -155,11 +159,12 @@ export async function setAttention(c: Conversation, body: unknown) {
 
 /** Asks the question and waits, durably, for its answer. Also how the guard asks for approval. Replay finds the question this call already asked. */
 export async function askAndWait(
-  args: { question: string; choices?: string[]; timeout?: number },
+  args: { question: string; choices?: string[]; timeout?: number; context?: string },
   api: ToolExecutionApi,
   context: Context,
 ): Promise<ToolExecutionResult> {
   if (args.timeout !== undefined && !(args.timeout > 0)) throw Error("timeout must be a positive number of seconds");
+  if (args.context !== undefined && args.context.length > CONTEXT_MAX) throw Error(`context must be at most ${CONTEXT_MAX} characters`);
   const timeoutMs = args.timeout !== undefined ? args.timeout * 1000 : DEFAULT_TIMEOUT_MS;
   // A replay after a crash finds the question this call asked instead of asking again.
   const asked = await api.commit(async (tx) => {
@@ -180,6 +185,7 @@ export async function askAndWait(
       taskId: taskId as number,
       question: args.question,
       ...(args.choices?.length ? { choices: args.choices } : {}),
+      ...(args.context?.trim() ? { context: args.context.trim() } : {}),
       askedAt,
       timeoutAt: askedAt + timeoutMs,
       status: "pending",
@@ -212,6 +218,9 @@ export function createAskUser() {
       question: Type.String({ description: "What you need to know, in one or two sentences." }),
       choices: Type.Optional(Type.Array(Type.String(), { description: "Options to offer, such as [\"Approve\", \"Deny\"]." })),
       timeout: Type.Optional(Type.Number({ description: "Seconds to wait before treating it as denied." })),
+      context: Type.Optional(
+        Type.String({ description: "The evidence behind the question: what you saw, with numbers and times, in a few lines. Shown with the question wherever the user answers it." }),
+      ),
     }),
     replay: "safe",
     execute: (args, api, context) => askAndWait(args, api, context),
@@ -240,7 +249,7 @@ export function createAskUser() {
       section(
         "ask-user",
         () =>
-          "You may be running with nobody watching. Use ask_user when you need a decision or approval; do not guess. Use notify to flag something the user should see.",
+          "You may be running with nobody watching. Use ask_user when you need a decision or approval; do not guess. Keep the question to the question itself, and put what made you ask (what you saw, with numbers and times) in its context. Use notify to flag something the user should see.",
         { tag: false },
       ),
     ],
