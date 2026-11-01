@@ -7,7 +7,7 @@
 //   "check:[ <task id>|<job id>]" → one check_durable_job call
 //   "search: <words>" → one search_history call
 //   "page: <summary>" → one ping_on_call_engineer call
-//   "ask: <question>[ | <choice>…][ | timeout=<seconds>]" → one ask_user call
+//   "ask: <question>[ | <choice>…][ | timeout=<seconds>][ | context=<text>]" → one ask_user call
 //   "notify: <message>" → one notify call
 //   "write: <path>"  → one write call;  "edit: <path>" → one edit call (hello → bye)
 //   "Release check: …" (the release-check job's subagent) → one bash call
@@ -76,11 +76,13 @@ export function installFaux(models: MutableModels) {
     if (prompt.startsWith("ask:")) {
       const [question, ...rest] = prompt.slice(4).split("|").map((s) => s.trim());
       const timeout = rest.find((s) => /^timeout=\d+$/.test(s));
-      const choices = rest.filter((s) => s !== timeout);
+      const context = rest.find((s) => s.startsWith("context="));
+      const choices = rest.filter((s) => s !== timeout && s !== context);
       return call("ask_user", {
         question,
         ...(choices.length ? { choices } : {}),
         ...(timeout ? { timeout: Number(timeout.split("=")[1]) } : {}),
+        ...(context ? { context: context.slice("context=".length) } : {}),
       });
     }
     if (prompt.startsWith("write:")) return call("write", { path: prompt.slice(6).trim(), content: "written by the agent\n" });
